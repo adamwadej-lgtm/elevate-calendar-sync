@@ -630,7 +630,7 @@ export default function App() {
                       <Users className="w-10 h-10" />
                    </div>
                    <h2 className="text-2xl font-bold text-gray-900 mb-2">Ready to Sync?</h2>
-                   <p className="text-gray-500 max-w-sm mx-auto">Select or create a new event then select team members to automatically begin finding availability to meet</p>
+                   <p className="text-gray-500 max-w-sm mx-auto">Select or create +New Event then select team members, and app will automatically begin finding availability to meet.</p>
                 </div>
               )}
             </motion.div>
