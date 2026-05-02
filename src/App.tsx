@@ -3,24 +3,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  Users, 
-  Calendar as CalendarIcon, 
-  Plus, 
-  Trash2, 
-  Edit2, 
-  Save, 
-  X, 
-  Settings as SettingsIcon,
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import {
+  Users,
+  Calendar as CalendarIcon,
+  Plus,
+  X,
   CheckCircle2,
   Clock,
   ChevronRight,
-  UserPlus
+  Mic,
+  MicOff,
+  Send,
+  Copy,
+  Loader2,
+  Check,
+  AlertCircle,
+  Edit2,
+  Trash2,
+  PlusCircle,
+  Keyboard,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { getFirestore, doc, onSnapshot, collection, addDoc, updateDoc, getDoc } from 'firebase/firestore';
 
 // --- Firebase Config ---
 const firebaseConfig = {
@@ -36,94 +42,48 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
-// --- Firebase Helpers ---
-const saveProfilesToFirebase = async (profiles: Profile[]) => {
-  try {
-    await setDoc(doc(db, 'appData', 'profiles'), { profiles });
-  } catch (e) {
-    console.error('Error saving profiles:', e);
-  }
-};
-
-const saveEventsToFirebase = async (events: AppEvent[]) => {
-  try {
-    await setDoc(doc(db, 'appData', 'events'), { events });
-  } catch (e) {
-    console.error('Error saving events:', e);
-  }
-};
-
 // --- Types ---
-
-type TimeRange = {
-  start: string; // "HH:mm"
-  end: string;   // "HH:mm"
+type ParsedSlot = {
+  date: string;   // YYYY-MM-DD
+  start: string;  // HH:mm
+  end: string;    // HH:mm
+  unavailable?: boolean;
 };
 
-type DailySchedule = Record<number, TimeRange[]>; // 0-6 (Sun-Sat)
-
-type Availability = {
-  weekA: DailySchedule;
-  weekB: DailySchedule;
-};
-
-type Profile = {
+type Participant = {
   id: string;
   name: string;
-  startDate: string; // Start date for Schedule One
-  availability: Availability; // Schedule One
-  hasScheduleTwo: boolean;
-  scheduleTwo?: {
-    startDate: string;
-    availability: Availability;
-  };
+  transcript: string;
+  slots: ParsedSlot[];
+  submittedAt: string;
+};
+
+type MeetingGroup = {
+  id: string;
+  title: string;
+  creatorName: string;
+  creatorEmail: string;
+  deadline: string;
+  expectedCount: number;
+  participants: Participant[];
+  createdAt: string;
+  notified: boolean;
 };
 
 type SyncResult = {
-  date: Date;
-  isWeekA: boolean;
-  availableMembers: string[]; // ids
-  overlapRanges: TimeRange[];
-  matchType: 'full' | 'partial';
+  date: string;
+  slots: { start: string; end: string }[];
+  participantNames: string[];
+  isFull: boolean;
 };
 
-type AppEvent = {
-  id: string;
-  title: string;
-  eventDates: string[]; // dates it takes place e.g. ["2026-05-12"]
-  planningStartDate: string;
-  planningEndDate: string;
-  memberIds: string[];
+type EditingSlot = {
+  index: number;
+  start: string;
+  end: string;
 };
 
 // --- Utils ---
-
-const DAYS = [
-  { label: 'Sun', value: 0 },
-  { label: 'Mon', value: 1 },
-  { label: 'Tue', value: 2 },
-  { label: 'Wed', value: 3 },
-  { label: 'Thu', value: 4 },
-  { label: 'Fri', value: 5 },
-  { label: 'Sat', value: 6 },
-];
-
-const getSundays = () => {
-  const sundays = [];
-  const now = new Date();
-  
-  const start = new Date(now);
-  start.setDate(now.getDate() - now.getDay());
-  start.setHours(0,0,0,0);
-
-  for (let i = 0; i < 10; i++) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + (i * 7));
-    sundays.push(d.toISOString().split('T')[0]);
-  }
-  return sundays;
-};
-
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
 const formatTime = (time: string) => {
@@ -134,1741 +94,906 @@ const formatTime = (time: string) => {
   return `${h}:${minutes.toString().padStart(2, '0')} ${ampm}`;
 };
 
-const getIntersection = (schedules: TimeRange[][]): TimeRange[] => {
-  if (schedules.length === 0) return [];
-  
-  let commonRanges = [...schedules[0]];
-
-  for (let i = 1; i < schedules.length; i++) {
-    const personRanges = schedules[i];
-    const nextCommon: TimeRange[] = [];
-
-    for (const a of commonRanges) {
-      for (const b of personRanges) {
-        const intersection = getSingleIntersection(a, b);
-        if (intersection) {
-          nextCommon.push(intersection);
-        }
-      }
-    }
-    commonRanges = nextCommon;
-    if (commonRanges.length === 0) break;
-  }
-
-  return commonRanges;
+const formatDate = (dateStr: string) => {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 };
 
-const getSingleIntersection = (r1: TimeRange, r2: TimeRange): TimeRange | null => {
-  const [s1H, s1M] = r1.start.split(':').map(Number);
-  const [e1H, e1M] = r1.end.split(':').map(Number);
-  const [s2H, s2M] = r2.start.split(':').map(Number);
-  const [e2H, e2M] = r2.end.split(':').map(Number);
-
-  const startMinutes = Math.max(s1H * 60 + s1M, s2H * 60 + s2M);
-  const endMinutes = Math.min(e1H * 60 + e1M, e2H * 60 + e2M);
-
-  if (startMinutes >= endMinutes) return null;
-
-  return {
-    start: `${Math.floor(startMinutes / 60).toString().padStart(2, '0')}:${(startMinutes % 60).toString().padStart(2, '0')}`,
-    end: `${Math.floor(endMinutes / 60).toString().padStart(2, '0')}:${(endMinutes % 60).toString().padStart(2, '0')}`
-  };
+const formatDateFull = (dateStr: string) => {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 };
 
-// --- Components ---
+// --- Claude AI Parser ---
+const parseAvailabilityWithClaude = async (
+  transcript: string,
+  referenceDate: string,
+  existingSlots: ParsedSlot[] = []
+): Promise<ParsedSlot[]> => {
+  const existingContext = existingSlots.length > 0
+    ? `\n\nExisting schedule to merge/update:\n${JSON.stringify(existingSlots)}`
+    : '';
 
-export default function App() {
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [events, setEvents] = useState<AppEvent[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      messages: [{
+        role: 'user',
+        content: `Today's date is ${referenceDate}. Parse this availability statement into structured JSON.${existingContext}
 
-  const [activeEventId, setActiveEventId] = useState<string | null>(null);
-  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
-  const [editingEvent, setEditingEvent] = useState<Partial<AppEvent>>({
-    title: '',
-    eventDates: [],
-    planningStartDate: new Date().toISOString().split('T')[0],
-    planningEndDate: '',
-    memberIds: []
+Statement: "${transcript}"
+
+Return ONLY a JSON array. Each item must have:
+- "date": YYYY-MM-DD
+- "start": HH:mm (24hr) — use "00:00" if unavailable all day
+- "end": HH:mm (24hr) — use "00:00" if unavailable all day  
+- "unavailable": true ONLY if the person explicitly says they are NOT available that date
+
+Rules:
+- Expand recurring patterns ("every Monday in June" = list each Monday)
+- Handle exclusions ("except June 8th" = mark June 8th as unavailable: true)
+- Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
+- If merging with existing: apply corrections, keep everything else unchanged
+- "remove June 4th" = remove that date from results entirely
+- Return ONLY the JSON array, no explanation, no markdown backticks.`
+      }]
+    })
   });
 
-  // Real-time Firebase listeners
+  const data = await response.json();
+  const text = data.content?.[0]?.text || '[]';
+  try {
+    const clean = text.replace(/```json|```/g, '').trim();
+    return JSON.parse(clean);
+  } catch {
+    return existingSlots;
+  }
+};
+
+// --- Sync Calculator ---
+const timeToMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+const minToTime = (m: number) => { const h = Math.floor(m / 60); const min = m % 60; return `${h.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}`; };
+
+const findOverlap = (allSlots: ParsedSlot[][]): { start: string; end: string }[] => {
+  if (allSlots.length === 0) return [];
+  if (allSlots.length === 1) return allSlots[0].filter(s => !s.unavailable).map(s => ({ start: s.start, end: s.end }));
+  let common = allSlots[0].filter(s => !s.unavailable).map(s => ({ start: s.start, end: s.end }));
+  for (let i = 1; i < allSlots.length; i++) {
+    const next: { start: string; end: string }[] = [];
+    for (const a of common) {
+      for (const b of allSlots[i].filter(s => !s.unavailable)) {
+        const start = Math.max(timeToMin(a.start), timeToMin(b.start));
+        const end = Math.min(timeToMin(a.end), timeToMin(b.end));
+        if (start < end) next.push({ start: minToTime(start), end: minToTime(end) });
+      }
+    }
+    common = next;
+    if (common.length === 0) break;
+  }
+  return common;
+};
+
+const calculateSync = (participants: Participant[]): SyncResult[] => {
+  if (participants.length === 0) return [];
+  const dateMap: Record<string, { participantId: string; name: string; slots: ParsedSlot[] }[]> = {};
+  participants.forEach(p => {
+    p.slots.filter(s => !s.unavailable).forEach(slot => {
+      if (!dateMap[slot.date]) dateMap[slot.date] = [];
+      const existing = dateMap[slot.date].find(x => x.participantId === p.id);
+      if (existing) existing.slots.push(slot);
+      else dateMap[slot.date].push({ participantId: p.id, name: p.name, slots: [slot] });
+    });
+  });
+  const results: SyncResult[] = [];
+  Object.entries(dateMap).forEach(([date, participantSlots]) => {
+    const overlap = findOverlap(participantSlots.map(ps => ps.slots));
+    if (overlap.length > 0) {
+      results.push({ date, slots: overlap, participantNames: participantSlots.map(ps => ps.name), isFull: participantSlots.length === participants.length });
+    }
+  });
+  return results.sort((a, b) => a.date.localeCompare(b.date));
+};
+
+// --- Main App ---
+export default function App() {
+  const [view, setView] = useState<'home' | 'create' | 'submit' | 'results'>('home');
+  const [meetingGroups, setMeetingGroups] = useState<MeetingGroup[]>([]);
+  const [activeMeeting, setActiveMeeting] = useState<MeetingGroup | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [joinCode, setJoinCode] = useState('');
+  const [joinError, setJoinError] = useState('');
+  const [hasMic, setHasMic] = useState<boolean | null>(null);
+  const [copiedId, setCopiedId] = useState('');
+
+  // Create form
+  const [createForm, setCreateForm] = useState({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4 });
+
+  // Submit flow
+  const [submitStep, setSubmitStep] = useState<'input' | 'review' | 'editing' | 'done'>('input');
+  const [participantName, setParticipantName] = useState('');
+  const [transcript, setTranscript] = useState('');
+  const [textInput, setTextInput] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
+  const [parsedSlots, setParsedSlots] = useState<ParsedSlot[]>([]);
+  const [submitError, setSubmitError] = useState('');
+
+  // Edit flow
+  const [editingSlot, setEditingSlot] = useState<EditingSlot | null>(null);
+  const [isEditRecording, setIsEditRecording] = useState(false);
+  const [editTranscript, setEditTranscript] = useState('');
+  const [editTextInput, setEditTextInput] = useState('');
+  const [isEditParsing, setIsEditParsing] = useState(false);
+  const [longPressTimer, setLongPressTimer] = useState<any>(null);
+
+  const recognitionRef = useRef<any>(null);
+  const editRecognitionRef = useRef<any>(null);
+
+  // Check mic availability
   useEffect(() => {
-    const unsubProfiles = onSnapshot(doc(db, 'appData', 'profiles'), (snap) => {
-      if (snap.exists()) {
-        const raw = snap.data().profiles || [];
-        const normalized = raw.map((p: any) => {
-          const p1 = {
-            ...p,
-            hasScheduleTwo: p.hasScheduleTwo || false,
-            startDate: p.startDate || getSundays()[0],
-            availability: {
-              weekA: Object.fromEntries(DAYS.map(d => [d.value, Array.isArray(p.availability?.weekA?.[d.value]) ? p.availability.weekA[d.value] : (p.availability?.weekA?.[d.value] ? [p.availability.weekA[d.value]] : [])])),
-              weekB: Object.fromEntries(DAYS.map(d => [d.value, Array.isArray(p.availability?.weekB?.[d.value]) ? p.availability.weekB[d.value] : (p.availability?.weekB?.[d.value] ? [p.availability.weekB[d.value]] : [])])),
-            }
-          };
-          if (p1.hasScheduleTwo && p1.scheduleTwo) {
-            p1.scheduleTwo.availability = {
-              weekA: Object.fromEntries(DAYS.map(d => [d.value, Array.isArray(p1.scheduleTwo.availability?.weekA?.[d.value]) ? p1.scheduleTwo.availability.weekA[d.value] : (p1.scheduleTwo.availability?.weekA?.[d.value] ? [p1.scheduleTwo.availability.weekA[d.value]] : [])])),
-              weekB: Object.fromEntries(DAYS.map(d => [d.value, Array.isArray(p1.scheduleTwo.availability?.weekB?.[d.value]) ? p1.scheduleTwo.availability.weekB[d.value] : (p1.scheduleTwo.availability?.weekB?.[d.value] ? [p1.scheduleTwo.availability.weekB[d.value]] : [])])),
-            };
-          }
-          return p1;
-        });
-        setProfiles(normalized);
-      }
-      setIsLoading(false);
-    }, (err) => {
-      console.error('Profiles listener error:', err);
-      setIsLoading(false);
-    });
-
-    const unsubEvents = onSnapshot(doc(db, 'appData', 'events'), (snap) => {
-      if (snap.exists()) {
-        setEvents(snap.data().events || []);
-      }
-    }, (err) => {
-      console.error('Events listener error:', err);
-    });
-
-    return () => {
-      unsubProfiles();
-      unsubEvents();
-    };
+    navigator.mediaDevices?.getUserMedia({ audio: true })
+      .then(() => setHasMic(true))
+      .catch(() => setHasMic(false));
   }, []);
 
-  // UI State
-  const [activeTab, setActiveTab] = useState<'sync' | 'members' | 'settings'>('sync');
-  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
-  const [profileToDelete, setProfileToDelete] = useState<Profile | null>(null);
-  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  
-  const [selectedEventIds, setSelectedEventIds] = useState<string[]>([]);
-  const [isDeletingBulk, setIsDeletingBulk] = useState(false);
-  const [eventToDelete, setEventToDelete] = useState<AppEvent | null>(null);
-  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
-
-  const [profileError, setProfileError] = useState<string | null>(null);
-  const [eventError, setEventError] = useState<string | null>(null);
-
-  const [activeEditingSchedule, setActiveEditingSchedule] = useState<1 | 2>(1);
-
-  // Sync Active Event Members
+  // Firebase listener
   useEffect(() => {
-    if (activeEventId) {
-      const activeEvent = events.find(e => e.id === activeEventId);
-      if (activeEvent) {
-        setSelectedMemberIds(activeEvent.memberIds || []);
-      }
-    } else {
-      setSelectedMemberIds([]);
-    }
-  }, [activeEventId, events.length]);
+    const unsub = onSnapshot(collection(db, 'meetingGroups'), (snap) => {
+      const groups: MeetingGroup[] = [];
+      snap.forEach(d => groups.push({ id: d.id, ...d.data() } as MeetingGroup));
+      setMeetingGroups(groups.sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+      setIsLoading(false);
+    });
+    return () => unsub();
+  }, []);
 
-  // Persist local selection to Event via Firebase
+  // Check URL join code
   useEffect(() => {
-    if (activeEventId) {
-      const updatedEvents = events.map(ev => {
-        if (ev.id === activeEventId) {
-          if (JSON.stringify(ev.memberIds) !== JSON.stringify(selectedMemberIds)) {
-            return { ...ev, memberIds: selectedMemberIds };
-          }
-        }
-        return ev;
-      });
-      const changed = updatedEvents.some((ev, i) => ev !== events[i]);
-      if (changed) saveEventsToFirebase(updatedEvents);
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('join');
+    if (code) handleJoinMeeting(code);
+  }, []);
+
+  // Sync active meeting
+  useEffect(() => {
+    if (activeMeeting) {
+      const updated = meetingGroups.find(g => g.id === activeMeeting.id);
+      if (updated) setActiveMeeting(updated);
     }
-  }, [selectedMemberIds, activeEventId]);
+  }, [meetingGroups]);
 
-  // Sync Logic
-  const sortedProfiles = useMemo(() => {
-    return [...profiles].sort((a, b) => {
-      const aSelected = selectedMemberIds.includes(a.id);
-      const bSelected = selectedMemberIds.includes(b.id);
-      
-      if (aSelected && !bSelected) return -1;
-      if (!aSelected && bSelected) return 1;
-      
-      return a.name.localeCompare(b.name);
-    });
-  }, [profiles, selectedMemberIds]);
-
-  const alphabeticalProfiles = useMemo(() => {
-    return [...profiles].sort((a, b) => a.name.localeCompare(b.name));
-  }, [profiles]);
-
-  const categorizedEvents = useMemo(() => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    
-    const upcoming: AppEvent[] = [];
-    const past: AppEvent[] = [];
-    
-    events.forEach(ev => {
-      let isPast = false;
-      if (ev.eventDates && ev.eventDates.length > 0) {
-        const latestDate = new Date(Math.max(...ev.eventDates.map(d => new Date(d + 'T23:59:59').getTime())));
-        isPast = latestDate < today;
-      } else {
-        isPast = new Date(ev.planningEndDate + 'T23:59:59') < today;
-      }
-      
-      if (isPast) past.push(ev);
-      else upcoming.push(ev);
-    });
-    
-    const sortByDate = (a: AppEvent, b: AppEvent) => {
-      const dateA = a.eventDates?.[0] || a.planningStartDate;
-      const dateB = b.eventDates?.[0] || b.planningStartDate;
-      return new Date(dateA).getTime() - new Date(dateB).getTime();
-    };
-
-    return { 
-      upcoming: upcoming.sort(sortByDate), 
-      past: past.sort((a, b) => sortByDate(b, a))
-    };
-  }, [events]);
-
-  const handleBulkDeleteEvents = () => {
-    if (selectedEventIds.length === 0) return;
-    const updatedEvents = events.filter(ev => !selectedEventIds.includes(ev.id));
-    saveEventsToFirebase(updatedEvents);
-    if (activeEventId && selectedEventIds.includes(activeEventId)) {
-      setActiveEventId(null);
-    }
-    setSelectedEventIds([]);
-    setIsDeletingBulk(false);
+  const handleCreateMeeting = async () => {
+    if (!createForm.title || !createForm.creatorName || !createForm.creatorEmail || !createForm.deadline) return;
+    const newMeeting = { ...createForm, participants: [], createdAt: new Date().toISOString(), notified: false };
+    const docRef = await addDoc(collection(db, 'meetingGroups'), newMeeting);
+    setActiveMeeting({ ...newMeeting, id: docRef.id });
+    setView('results');
+    setCreateForm({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4 });
   };
 
-  const getEffectiveAvailability = (profile: Profile, targetDate: Date) => {
-    const targetStr = targetDate.toISOString().split('T')[0];
-    
-    // Check if Schedule Two is active and date is >= its start date
-    if (profile.hasScheduleTwo && profile.scheduleTwo && targetStr >= profile.scheduleTwo.startDate) {
-      return {
-        startDate: profile.scheduleTwo.startDate,
-        availability: profile.scheduleTwo.availability
-      };
+  const handleJoinMeeting = async (code: string) => {
+    const id = code.trim();
+    const docSnap = await getDoc(doc(db, 'meetingGroups', id));
+    if (docSnap.exists()) {
+      setActiveMeeting({ id: docSnap.id, ...docSnap.data() } as MeetingGroup);
+      setView('submit');
+      setJoinError('');
+    } else {
+      setJoinError('Meeting not found. Check the link and try again.');
     }
-    
-    // Default to Schedule One
-    return {
-      startDate: profile.startDate,
-      availability: profile.availability
+  };
+
+  // --- Main recording ---
+  const startRecording = () => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { setSubmitError('Voice not supported. Please use Chrome.'); return; }
+    const recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.onresult = (event: any) => {
+      let final = ''; let interim = '';
+      for (let i = 0; i < event.results.length; i++) {
+        if (event.results[i].isFinal) final += event.results[i][0].transcript + ' ';
+        else interim += event.results[i][0].transcript;
+      }
+      setTranscript(final + interim);
     };
+    recognition.onerror = () => { setIsRecording(false); setSubmitError('Recording error. Try again.'); };
+    recognition.onend = () => setIsRecording(false);
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsRecording(true);
+    setTranscript('');
+    setSubmitError('');
+  };
+
+  const stopRecording = () => {
+    if (recognitionRef.current) recognitionRef.current.stop();
+    setIsRecording(false);
+  };
+
+  const handleProcessInput = async () => {
+    const input = hasMic ? transcript : textInput;
+    if (!input.trim() || !participantName.trim()) {
+      setSubmitError('Please enter your name and provide your availability.');
+      return;
+    }
+    setIsParsing(true);
+    setSubmitError('');
+    const today = new Date().toISOString().split('T')[0];
+    const slots = await parseAvailabilityWithClaude(input, today);
+    setParsedSlots(slots);
+    setSubmitStep('review');
+    setIsParsing(false);
+  };
+
+  // --- Edit recording ---
+  const startEditRecording = () => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    const recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.onresult = (event: any) => {
+      let final = ''; let interim = '';
+      for (let i = 0; i < event.results.length; i++) {
+        if (event.results[i].isFinal) final += event.results[i][0].transcript + ' ';
+        else interim += event.results[i][0].transcript;
+      }
+      setEditTranscript(final + interim);
+    };
+    recognition.onerror = () => setIsEditRecording(false);
+    recognition.onend = () => setIsEditRecording(false);
+    editRecognitionRef.current = recognition;
+    recognition.start();
+    setIsEditRecording(true);
+    setEditTranscript('');
+  };
+
+  const stopEditRecording = () => {
+    if (editRecognitionRef.current) editRecognitionRef.current.stop();
+    setIsEditRecording(false);
+  };
+
+  const handleApplyEdit = async () => {
+    const input = hasMic ? editTranscript : editTextInput;
+    if (!input.trim()) return;
+    setIsEditParsing(true);
+    const today = new Date().toISOString().split('T')[0];
+    const updated = await parseAvailabilityWithClaude(input, today, parsedSlots);
+    setParsedSlots(updated);
+    setSubmitStep('review');
+    setEditTranscript('');
+    setEditTextInput('');
+    setEditingSlot(null);
+    setIsEditParsing(false);
+  };
+
+  // Long press / right click to edit individual slot time
+  const handleLongPressStart = (index: number, slot: ParsedSlot) => {
+    const timer = setTimeout(() => {
+      setEditingSlot({ index, start: slot.start, end: slot.end });
+      setSubmitStep('editing');
+    }, 600);
+    setLongPressTimer(timer);
+  };
+
+  const handleLongPressEnd = () => {
+    if (longPressTimer) { clearTimeout(longPressTimer); setLongPressTimer(null); }
+  };
+
+  const handleRightClick = (e: React.MouseEvent, index: number, slot: ParsedSlot) => {
+    e.preventDefault();
+    setEditingSlot({ index, start: slot.start, end: slot.end });
+    setSubmitStep('editing');
+  };
+
+  const handleSaveSlotEdit = () => {
+    if (!editingSlot) return;
+    const updated = [...parsedSlots];
+    updated[editingSlot.index] = { ...updated[editingSlot.index], start: editingSlot.start, end: editingSlot.end };
+    setParsedSlots(updated);
+    setEditingSlot(null);
+    setSubmitStep('review');
+  };
+
+  const handleRemoveSlot = (index: number) => {
+    setParsedSlots(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSubmitAvailability = async () => {
+    if (!activeMeeting) return;
+    const participant: Participant = {
+      id: generateId(),
+      name: participantName.trim(),
+      transcript: hasMic ? transcript : textInput,
+      slots: parsedSlots,
+      submittedAt: new Date().toISOString()
+    };
+    const updatedParticipants = [...(activeMeeting.participants || []), participant];
+    await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
+    setSubmitStep('done');
+    setParticipantName('');
+    setTranscript('');
+    setTextInput('');
+    setParsedSlots([]);
+  };
+
+  const copyJoinLink = (meetingId: string) => {
+    const url = `${window.location.origin}${window.location.pathname}?join=${meetingId}`;
+    navigator.clipboard.writeText(url);
+    setCopiedId(meetingId);
+    setTimeout(() => setCopiedId(''), 2000);
+  };
+
+  const resetSubmit = () => {
+    setSubmitStep('input');
+    setTranscript('');
+    setTextInput('');
+    setParsedSlots([]);
+    setEditTranscript('');
+    setEditTextInput('');
+    setEditingSlot(null);
+    setSubmitError('');
   };
 
   const syncResults = useMemo(() => {
-    if (selectedMemberIds.length < 1 || !activeEventId) return [];
-    
-    const activeEvent = events.find(e => e.id === activeEventId);
-    if (!activeEvent) return [];
-    
-    let rangeStart = new Date(activeEvent.planningStartDate + 'T00:00:00');
-    let rangeEnd = new Date(activeEvent.planningEndDate + 'T23:59:59');
+    if (!activeMeeting) return [];
+    return calculateSync(activeMeeting.participants || []);
+  }, [activeMeeting]);
 
-    const results: SyncResult[] = [];
-    
-    const daysDiff = Math.floor((rangeEnd.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-    const iterations = Math.min(Math.max(daysDiff, 1), 100); // Safety cap
+  const fullMatches = syncResults.filter(r => r.isFull);
+  const partialMatches = syncResults.filter(r => !r.isFull);
 
-    for (let i = 0; i < iterations; i++) {
-      const d = new Date(rangeStart);
-      d.setDate(d.getDate() + i);
-      
-      const dayOfWeek = d.getDay();
-      
-      const availableMembers: string[] = [];
-      const memberSchedules: TimeRange[][] = [];
-
-      selectedMemberIds.forEach(id => {
-        const profile = profiles.find(p => p.id === id);
-        if (!profile) return;
-
-        const { startDate, availability } = getEffectiveAvailability(profile, d);
-        const profileAnchor = new Date(startDate + 'T12:00:00');
-        const pDiffDays = Math.floor((d.getTime() - profileAnchor.getTime()) / (1000 * 60 * 60 * 24));
-        const pWeekIndex = Math.floor(pDiffDays / 7);
-        const pModWeek = ((pWeekIndex % 2) + 2) % 2;
-        const pIsWeekA = pModWeek === 0;
-
-        const sched = pIsWeekA ? availability.weekA : availability.weekB;
-        const dayScheds = sched[dayOfWeek] || [];
-        if (dayScheds.length > 0) {
-          availableMembers.push(id);
-          memberSchedules.push(dayScheds);
-        }
-      });
-
-      if (availableMembers.length >= 1) {
-        const overlaps = getIntersection(memberSchedules);
-        results.push({
-          date: d,
-          isWeekA: true, // Legacy field, no longer globally significant
-          availableMembers,
-          overlapRanges: overlaps,
-          matchType: availableMembers.length === selectedMemberIds.length ? 'full' : 'partial'
-        });
-      }
-    }
-
-    return results.sort((a, b) => a.date.getTime() - b.date.getTime());
-  }, [selectedMemberIds, profiles, activeEventId, events]);
-
-  const fullMatches = syncResults.filter(r => r.matchType === 'full' && r.overlapRanges.length > 0);
-  const partialMatches = syncResults.filter(r => r.matchType === 'partial' || (r.matchType === 'full' && r.overlapRanges.length === 0));
-
-  const handleEditProfile = (profile: Profile) => {
-    setProfileError(null);
-    setActiveEditingSchedule(1);
-    // Ensure the start date is set and snapped to Sunday
-    const currentStart = profile.startDate || new Date().toISOString().split('T')[0];
-    const d = new Date(currentStart + 'T12:00:00');
-    let fixedDate = currentStart;
-    
-    if (d.getDay() !== 0) {
-      d.setDate(d.getDate() - d.getDay());
-      fixedDate = d.toISOString().split('T')[0];
-    }
-
-    setEditingProfile({
-      ...profile,
-      startDate: fixedDate
-    });
-    setIsProfileModalOpen(true);
-  };
-
-  const handleDeleteProfile = (id: string) => {
-    const profile = profiles.find(p => p.id === id);
-    if (profile) {
-      setProfileToDelete(profile);
-    }
-  };
-
-  const confirmDeleteProfile = () => {
-    if (profileToDelete) {
-      const id = profileToDelete.id;
-      const updatedProfiles = profiles.filter(p => p.id !== id);
-      saveProfilesToFirebase(updatedProfiles);
-      setSelectedMemberIds(prev => prev.filter(mid => mid !== id));
-      setProfileToDelete(null);
-    }
-  };
-
-  const handleSaveProfile = (profile: Profile) => {
-    if (!profile.name || !profile.name.trim()) {
-      setProfileError("Please enter a member name before saving.");
-      return;
-    }
-    setProfileError(null);
-    const finalProfile = { ...profile, startDate: profile.startDate || getSundays()[0] };
-    let updatedProfiles;
-    if (profiles.find(p => p.id === finalProfile.id)) {
-      updatedProfiles = profiles.map(p => p.id === finalProfile.id ? finalProfile : p);
-    } else {
-      updatedProfiles = [...profiles, finalProfile];
-    }
-    saveProfilesToFirebase(updatedProfiles);
-    setIsProfileModalOpen(false);
-    setEditingProfile(null);
-  };
-
-  const handleSaveEvent = () => {
-    if (!editingEvent.title || !editingEvent.planningEndDate) {
-      setEventError("Please fill in both the event title and the planning end date.");
-      return;
-    }
-    setEventError(null);
-    
-    const newEvent: AppEvent = {
-      id: editingEvent.id || generateId(),
-      title: editingEvent.title!,
-      eventDates: (editingEvent.eventDates || []).filter(d => !!d),
-      planningStartDate: editingEvent.planningStartDate || new Date().toISOString().split('T')[0],
-      planningEndDate: editingEvent.planningEndDate!,
-      memberIds: editingEvent.memberIds || []
-    };
-
-    let updatedEvents;
-    if (editingEvent.id) {
-      updatedEvents = events.map(ev => ev.id === editingEvent.id ? newEvent : ev);
-    } else {
-      updatedEvents = [...events, newEvent];
-      setActiveEventId(newEvent.id);
-      setActiveTab('sync');
-    }
-    saveEventsToFirebase(updatedEvents);
-    setIsEventModalOpen(false);
-  };
-
-  const handleDeleteEvent = (id: string) => {
-    const event = events.find(ev => ev.id === id);
-    if (event) {
-      setEventToDelete(event);
-    }
-  };
-
-  const confirmDeleteEvent = () => {
-    if (eventToDelete) {
-      const id = eventToDelete.id;
-      const updatedEvents = events.filter(ev => ev.id !== id);
-      saveEventsToFirebase(updatedEvents);
-      if (activeEventId === id) setActiveEventId(null);
-      setEventToDelete(null);
-    }
-  };
+  // Group slots for display
+  const availableSlots = parsedSlots.filter(s => !s.unavailable);
+  const unavailableSlots = parsedSlots.filter(s => s.unavailable);
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-brand-orange border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-brand-navy font-bold">Loading Elevate Calendar Sync...</p>
+          <div className="w-12 h-12 border-4 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-white font-bold">Loading Elevate Voice Sync...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+    <div className="min-h-screen bg-gray-950 text-white font-sans">
       {/* Header */}
-      <header className="bg-brand-navy text-white shadow-lg p-4 sm:px-8">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div 
-            className="flex items-center gap-3 cursor-pointer group"
-            onClick={() => {
-              setActiveTab('sync');
-              setActiveEventId(null);
-            }}
-          >
-            <div className="bg-brand-orange p-2 rounded-xl group-hover:scale-110 transition-transform">
-              <Users className="w-6 h-6 text-white" />
-            </div>
+      <header className="border-b border-white/10 px-6 py-4">
+        <div className="max-w-5xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-3 cursor-pointer" onClick={() => { setView('home'); setActiveMeeting(null); resetSubmit(); }}>
+            <div className="bg-orange-500 p-2 rounded-xl"><Mic className="w-5 h-5 text-white" /></div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">Elevate Calendar Sync</h1>
+              <h1 className="text-lg font-bold tracking-tight">Elevate Voice Sync</h1>
+              <p className="text-[10px] text-white/40 uppercase tracking-widest">Speak your availability</p>
             </div>
           </div>
-          
-          <div className="hidden md:flex items-center gap-4">
-            <button 
-              onClick={() => {
-                setEditingEvent({
-                  title: '',
-                  eventDates: [''],
-                  planningStartDate: new Date().toISOString().split('T')[0],
-                  planningEndDate: ''
-                });
-                setEventError(null);
-                setIsEventModalOpen(true);
-              }}
-              className="bg-brand-orange text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-orange-600 transition-all shadow-md active:scale-95 text-sm"
-            >
-              <Plus className="w-4 h-4" />
-              New Event
+          {view === 'home' && (
+            <button onClick={() => setView('create')} className="bg-orange-500 text-white px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 hover:bg-orange-600 transition-all">
+              <Plus className="w-4 h-4" />New Meeting Group
             </button>
-
-            <nav className="flex gap-1 bg-white/10 p-1 rounded-lg">
-              <TabButton active={activeTab === 'sync'} onClick={() => setActiveTab('sync')} icon={<CalendarIcon className="w-4 h-4" />}>Calendar Sync</TabButton>
-              <TabButton active={activeTab === 'members'} onClick={() => setActiveTab('members')} icon={<Users className="w-4 h-4" />}>Members</TabButton>
-              <TabButton active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} icon={<SettingsIcon className="w-4 h-4" />}>Settings</TabButton>
-            </nav>
-          </div>
-
-          <div className="md:hidden">
-            <MenuIcon 
-              activeTab={activeTab} 
-              setActiveTab={setActiveTab} 
-              setEditingEvent={setEditingEvent}
-              setIsEventModalOpen={setIsEventModalOpen}
-            />
-          </div>
+          )}
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-8">
+      <main className="max-w-5xl mx-auto px-6 py-8">
         <AnimatePresence mode="wait">
-          {activeTab === 'sync' && (
-            <motion.div 
-              key="sync"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-8"
-            >
-              {events.length > 0 && (
-                <div className="p-4 bg-white rounded-2xl border border-brand-navy/10 shadow-sm flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-4">
-                    <div className="p-2 bg-brand-navy/5 rounded-xl text-brand-navy">
-                       <CalendarIcon className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Planning Context</p>
-                      <select 
-                        className="bg-transparent font-bold text-brand-navy outline-none cursor-pointer text-lg leading-tight"
-                        value={activeEventId || ''}
-                        onChange={e => setActiveEventId(e.target.value || null)}
-                      >
-                         <option value="" disabled>Select an Event Context...</option>
-                         {events.map(ev => {
-                            const isPast = ev.eventDates?.[0] && new Date(ev.eventDates[0] + 'T23:59:59') < new Date();
-                            return (
-                              <option key={ev.id} value={ev.id}>
-                                {isPast ? '󰄱 [Past] ' : ''}Event: {ev.title}
-                              </option>
-                            );
-                         })}
-                      </select>
-                    </div>
-                  </div>
-                  {activeEventId && (() => {
-                    const activeEvent = events.find(e => e.id === activeEventId);
-                    if (!activeEvent) return null;
-                    const firstDate = activeEvent.eventDates?.[0] ? new Date(activeEvent.eventDates[0] + 'T12:00:00') : null;
-                    const today = new Date();
-                    today.setHours(0, 0, 0, 0);
-                    const diffDays = firstDate ? Math.ceil((new Date(activeEvent.eventDates[0] + 'T00:00:00').getTime() - today.getTime()) / (1000 * 60 * 60 * 24)) : null;
-                    const hasPassed = diffDays !== null && diffDays < 0;
 
-                    return (
-                      <div className={`flex items-center gap-6 ${hasPassed ? 'opacity-60 grayscale-[0.5]' : ''}`}>
-                        <div className="hidden sm:block text-right">
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Planning Range</p>
-                          <p className="text-xs font-bold text-brand-navy">
-                            {new Date(activeEvent.planningStartDate + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – {new Date(activeEvent.planningEndDate + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                          </p>
-                        </div>
-                        
-                        <div className="hidden lg:block text-right border-l pl-6 border-gray-100">
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Event Date</p>
-                          <p className="text-xs font-bold text-brand-navy">
-                            {firstDate ? firstDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : 'TBD'}
-                          </p>
-                        </div>
-
-                        <div className="hidden lg:block text-right border-l pl-6 border-gray-100">
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">Countdown</p>
-                          <p className={`text-xs font-bold ${diffDays !== null && diffDays <= 7 && !hasPassed ? 'text-brand-orange' : 'text-brand-navy'}`}>
-                            {diffDays !== null ? (diffDays < 0 ? 'Completed' : diffDays === 0 ? 'Today!' : `${diffDays} Days Left`) : '—'}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center gap-1 border-l pl-4 border-gray-100">
-                          <button 
-                            onClick={() => {
-                              setEditingEvent(activeEvent);
-                              setIsEventModalOpen(true);
-                            }}
-                            className="p-2 text-gray-400 hover:text-brand-navy hover:bg-gray-50 rounded-xl transition-all"
-                            title="Edit Event"
-                          >
-                            <Edit2 className="w-5 h-5" />
-                          </button>
-                          <button 
-                            onClick={() => setActiveEventId(null)}
-                            className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
-                            title="Exit Event View"
-                          >
-                            <X className="w-5 h-5" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
-
-              <section className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-                <div className="flex flex-col md:flex-row md:items-end gap-6">
-                  <div className="flex-1 space-y-4">
-                    <label className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Step 1: Add Members to this team</label>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                      {sortedProfiles.map(profile => (
-                        <label 
-                          key={profile.id}
-                          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
-                            selectedMemberIds.includes(profile.id) 
-                              ? 'bg-brand-orange/10 border-brand-orange text-brand-orange' 
-                              : 'bg-white border-gray-200 hover:border-gray-300'
-                          }`}
-                        >
-                          <input 
-                            type="checkbox" 
-                            className="hidden"
-                            checked={selectedMemberIds.includes(profile.id)}
-                            onChange={() => {
-                              setSelectedMemberIds(prev => 
-                                prev.includes(profile.id) 
-                                  ? prev.filter(id => id !== profile.id) 
-                                  : [...prev, profile.id]
-                              );
-                            }}
-                          />
-                          <div className={`w-5 h-5 rounded-md border flex items-center justify-center ${selectedMemberIds.includes(profile.id) ? 'bg-brand-orange border-brand-orange text-white' : 'border-gray-300'}`}>
-                            {selectedMemberIds.includes(profile.id) && <CheckCircle2 className="w-4 h-4" />}
-                          </div>
-                          <div>
-                            <p className="font-semibold text-sm leading-tight">{profile.name}</p>
-                          </div>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-
-                  {selectedMemberIds.length > 0 && (
-                    <div className="bg-brand-navy text-white p-6 rounded-2xl md:w-64 flex flex-col justify-center text-center">
-                      <p className="text-4xl font-bold mb-1">{selectedMemberIds.length}</p>
-                      <p className="text-blue-200 text-xs uppercase font-medium tracking-widest">Members Selected</p>
-                    </div>
-                  )}
-                </div>
-              </section>
-
-              {selectedMemberIds.length > 0 ? (
-                <div className="space-y-12">
-                  {!activeEventId ? (
-                    <div className="text-center py-20 bg-brand-navy/5 rounded-[2.5rem] border border-dashed border-brand-navy/20">
-                      <CalendarIcon className="w-12 h-12 text-brand-navy/20 mx-auto mb-4" />
-                      <h3 className="text-lg font-bold text-brand-navy">Select a Planning Context</h3>
-                      <p className="text-gray-500 max-w-xs mx-auto text-sm mb-6">Choose an event from the top menu or create a "New Event" to start syncing your team for specific programs.</p>
-                      <button 
-                        onClick={() => {
-                          setEditingEvent({
-                            title: '',
-                            eventDates: [''],
-                            planningStartDate: new Date().toISOString().split('T')[0],
-                            planningEndDate: ''
-                          });
-                          setIsEventModalOpen(true);
-                        }}
-                        className="bg-brand-orange text-white px-6 py-2.5 rounded-xl font-bold shadow-md hover:bg-orange-600 transition-all text-sm inline-flex items-center gap-2"
-                      >
-                        <Plus className="w-4 h-4" />
-                        Create Your First Event
-                      </button>
-                    </div>
-                  ) : syncResults.length > 0 ? (
-                    <>
-                      {/* Full Matches */}
-                      <section>
-                        <div className="flex items-center gap-3 mb-6">
-                          <div className="h-px flex-1 bg-gray-200"></div>
-                          <h2 className="text-sm font-bold text-gray-400 uppercase tracking-[0.2em] px-4">Perfect Sync: Everyone Free</h2>
-                          <div className="h-px flex-1 bg-gray-200"></div>
-                        </div>
-                        {fullMatches.length > 0 ? (
-                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                            {fullMatches.map((res, i) => (
-                              <ResultCard key={i} result={res} profiles={profiles} />
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="text-center py-12 bg-white rounded-3xl border border-dashed border-gray-300">
-                            <CalendarIcon className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-                            <p className="text-gray-500 font-medium">No dates where everyone is overlapping in this window.</p>
-                            <p className="text-gray-400 text-sm">Try adjusting individual schedules or the planning context.</p>
-                          </div>
-                        )}
-                      </section>
-
-                      {/* Partial Matches */}
-                      <section>
-                        <div className="flex items-center gap-3 mb-6">
-                          <div className="h-px flex-1 bg-gray-200"></div>
-                          <h2 className="text-sm font-bold text-gray-400 uppercase tracking-[0.2em] px-4">Partial Sync: High Availability</h2>
-                          <div className="h-px flex-1 bg-gray-200"></div>
-                        </div>
-                        {partialMatches.length > 0 ? (
-                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 opacity-80">
-                            {partialMatches.map((res, i) => (
-                              <ResultCard key={i} result={res} profiles={profiles} totalSelected={selectedMemberIds.length} />
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="text-center py-8">
-                            <p className="text-gray-400 text-sm">No partial sync dates found.</p>
-                          </div>
-                        )}
-                      </section>
-                    </>
-                  ) : (
-                    <div className="text-center py-24 bg-white rounded-[2.5rem] border border-gray-100 shadow-sm">
-                       <CalendarIcon className="w-16 h-16 text-gray-100 mx-auto mb-4" />
-                       <h2 className="text-2xl font-bold text-gray-900 mb-2">No sync found for this range</h2>
-                       <p className="text-gray-500 max-w-sm mx-auto">Everyone appears to be busy during the selected planning window. Try adjusting member schedules.</p>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="text-center py-24">
-                   <div className="mb-6 inline-flex p-4 rounded-full bg-blue-50 text-brand-navy">
-                      <Users className="w-10 h-10" />
-                   </div>
-                   <h2 className="text-2xl font-bold text-gray-900 mb-2">Ready to Sync?</h2>
-                   <p className="text-gray-500 max-w-sm mx-auto">Select or create +New Event then select team members, and app will automatically begin finding availability to meet.</p>
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {activeTab === 'members' && (
-            <motion.div 
-               key="members"
-               initial={{ opacity: 0, x: 20 }}
-               animate={{ opacity: 1, x: 0 }}
-               className="space-y-6"
-            >
-              <div className="flex justify-between items-center">
-                <h2 className="text-2xl font-bold text-brand-navy">Team Directory</h2>
-                <button 
-                  onClick={() => {
-                    setEditingProfile({
-                      id: generateId(),
-                      name: '',
-                      startDate: (() => {
-                        const d = new Date();
-                        d.setDate(d.getDate() - d.getDay());
-                        return d.toISOString().split('T')[0];
-                      })(),
-                      availability: { 
-                        weekA: Object.fromEntries(DAYS.map(d => [d.value, []])), 
-                        weekB: Object.fromEntries(DAYS.map(d => [d.value, []])) 
-                      },
-                      hasScheduleTwo: false
-                    });
-                    setProfileError(null);
-                    setActiveEditingSchedule(1);
-                    setIsProfileModalOpen(true);
-                  }}
-                  className="bg-brand-orange text-white px-6 py-2.5 rounded-xl font-bold shadow-sm hover:shadow-md hover:bg-orange-600 transition-all flex items-center gap-2"
-                >
-                  <Plus className="w-5 h-5" />
-                  Add Member
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                {alphabeticalProfiles.map(profile => (
-                  <ProfileCard 
-                    key={profile.id} 
-                    profile={profile} 
-                    onEdit={() => handleEditProfile(profile)}
-                    onDelete={() => handleDeleteProfile(profile.id)}
-                  />
-                ))}
-              </div>
-
-              {profiles.length === 0 && (
-                <div className="text-center py-32 bg-white rounded-3xl border border-gray-100 shadow-sm">
-                  <UserPlus className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-                  <p className="text-gray-500 font-medium">Your directory is empty.</p>
-                  <p className="text-gray-400 text-sm">Add your first employee profile to start syncing.</p>
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {activeTab === 'settings' && (
-            <motion.div 
-               key="settings"
-               initial={{ opacity: 0, scale: 0.95 }}
-               animate={{ opacity: 1, scale: 1 }}
-               className="max-w-4xl mx-auto py-12 space-y-8"
-            >
-              {/* Event Management Section */}
-              <div className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
-                  <div className="flex items-center gap-4">
-                    <div className="p-3 rounded-2xl bg-orange-50 text-brand-orange">
-                      <CalendarIcon className="w-6 h-6" />
-                    </div>
-                    <div>
-                      <h2 className="text-2xl font-bold">Event Management</h2>
-                      <p className="text-sm text-gray-500">Manage your planning contexts and context-specific availability.</p>
-                    </div>
-                  </div>
-                  
-                  {selectedEventIds.length > 0 && (
-                    <motion.div 
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      className="flex items-center gap-3"
-                    >
-                      <span className="text-sm font-bold text-gray-500">{selectedEventIds.length} Selected</span>
-                      <button 
-                        onClick={() => setIsDeletingBulk(true)}
-                        className="bg-red-50 text-red-600 px-4 py-2 rounded-xl font-bold text-sm flex items-center gap-2 hover:bg-red-100 transition-all border border-red-100"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                        Cancel Selected
-                      </button>
-                    </motion.div>
-                  )}
-                </div>
-
-                <div className="space-y-12">
-                  {/* Upcoming Events */}
-                  <section className="space-y-4">
-                    <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest px-1">Upcoming Events</h3>
-                    {categorizedEvents.upcoming.length > 0 ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {categorizedEvents.upcoming.map(ev => (
-                          <EventManagementCard 
-                            key={ev.id}
-                            event={ev}
-                            isSelected={selectedEventIds.includes(ev.id)}
-                            onToggleSelect={() => {
-                              setSelectedEventIds(prev => 
-                                prev.includes(ev.id) ? prev.filter(id => id !== ev.id) : [...prev, ev.id]
-                              );
-                            }}
-                            onEdit={() => {
-                              setEditingEvent(ev);
-                              setIsEventModalOpen(true);
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="py-12 text-center bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-                        <p className="text-sm text-gray-400">No upcoming events found.</p>
-                      </div>
-                    )}
-                  </section>
-
-                  {/* Past Events */}
-                  <section className="space-y-4">
-                    <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest px-1">Past Events</h3>
-                    {categorizedEvents.past.length > 0 ? (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 opacity-75 grayscale-[0.3]">
-                        {categorizedEvents.past.map(ev => (
-                          <EventManagementCard 
-                            key={ev.id}
-                            event={ev}
-                            isSelected={selectedEventIds.includes(ev.id)}
-                            isPast
-                            onToggleSelect={() => {
-                              setSelectedEventIds(prev => 
-                                prev.includes(ev.id) ? prev.filter(id => id !== ev.id) : [...prev, ev.id]
-                              );
-                            }}
-                            onEdit={() => {
-                              setEditingEvent(ev);
-                              setIsEventModalOpen(true);
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="py-8 text-center">
-                        <p className="text-sm text-gray-400">No past events found.</p>
-                      </div>
-                    )}
-                  </section>
-                </div>
-              </div>
-
-              {/* Legends Section */}
-              <div className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100">
-                <div className="flex items-center gap-4 mb-8">
-                  <div className="p-3 rounded-2xl bg-blue-50 text-brand-navy">
-                    <SettingsIcon className="w-6 h-6" />
-                  </div>
-                  <h2 className="text-2xl font-bold">App Legend</h2>
-                </div>
-
-                <div className="space-y-8">
-                  <div className="pt-0">
-                    <div className="space-y-4">
-                      <div className="flex items-start gap-4">
-                        <div className="w-3 h-3 rounded-full bg-brand-orange mt-1.5 shrink-0"></div>
-                        <div>
-                          <p className="font-bold text-sm">Week One / Week Two</p>
-                          <p className="text-xs text-gray-500">Teacher-Mentors often have alternating block schedules. Each member's individual anchor date helps the app know which schedule to apply for any future date.</p>
-                        </div>
-                      </div>
-                      <div className="flex items-start gap-4">
-                        <div className="w-3 h-3 rounded-full bg-green-500 mt-1.5 shrink-0"></div>
-                        <div>
-                          <p className="font-bold text-sm">Perfect Sync</p>
-                          <p className="text-xs text-gray-500">Dates where EVERY selected member has an overlapping available window. Priority for group meetings.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-        {/* Deletion Confirmation Modal */}
-        <AnimatePresence>
-          {profileToDelete && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setProfileToDelete(null)}
-                className="absolute inset-0 bg-brand-navy/60 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl p-8 text-center"
-              >
-                <div className="w-16 h-16 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                  <Trash2 className="w-8 h-8" />
-                </div>
-                <h3 className="text-xl font-bold text-brand-navy mb-2">Delete Profile?</h3>
-                <p className="text-gray-500 mb-8">
-                  Are you sure you want to delete <span className="font-bold text-gray-900">{profileToDelete.name}'s</span> profile? This action cannot be undone.
-                </p>
-                <div className="grid grid-cols-2 gap-3">
-                  <button 
-                    onClick={() => setProfileToDelete(null)}
-                    className="px-6 py-3 rounded-xl font-bold text-gray-400 hover:bg-gray-50 transition-all font-sans"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={confirmDeleteProfile}
-                    className="px-6 py-3 rounded-xl font-bold bg-red-500 text-white shadow-lg shadow-red-200 hover:bg-red-600 active:scale-95 transition-all font-sans"
-                  >
-                    Yes, Delete
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-
-        <AnimatePresence>
-          {isDeletingBulk && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setIsDeletingBulk(false)}
-                className="absolute inset-0 bg-brand-navy/60 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative bg-white rounded-[2rem] p-8 max-w-sm w-full shadow-2xl text-center"
-              >
-                <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto mb-6 text-2xl">
-                  🗑️
-                </div>
-                <h3 className="text-xl font-bold text-gray-900 mb-2">Cancel {selectedEventIds.length} Events?</h3>
-                <p className="text-gray-500 mb-8">This will permanently remove the record of these planning contexts. This action cannot be undone.</p>
+          {/* HOME */}
+          {view === 'home' && (
+            <motion.div key="home" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-8">
+              <div className="bg-white/5 border border-white/10 rounded-3xl p-6">
+                <h2 className="font-bold text-white mb-1">Join a Meeting Group</h2>
+                <p className="text-white/50 text-sm mb-4">Paste a meeting ID or full link to submit your availability.</p>
                 <div className="flex gap-3">
-                  <button 
-                    onClick={() => setIsDeletingBulk(false)}
-                    className="flex-1 px-6 py-3 rounded-xl font-bold text-gray-500 hover:bg-gray-50 transition-all border border-gray-100"
-                  >
-                    Keep Them
-                  </button>
-                  <button 
-                    onClick={handleBulkDeleteEvents}
-                    className="flex-1 px-6 py-3 rounded-xl font-bold bg-red-500 text-white hover:bg-red-600 transition-all shadow-lg shadow-red-200"
-                  >
-                    Cancel All
-                  </button>
+                  <input type="text" placeholder="Paste meeting ID or full link..." className="flex-1 bg-white/10 border border-white/10 rounded-xl px-4 py-2 text-sm text-white placeholder-white/30 outline-none focus:border-orange-500" value={joinCode} onChange={e => { const val = e.target.value; const match = val.match(/[?&]join=([^&]+)/); setJoinCode(match ? match[1] : val); }} />
+                  <button onClick={() => handleJoinMeeting(joinCode)} className="bg-orange-500 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-orange-600 transition-all">Join</button>
                 </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-
-        <AnimatePresence>
-          {eventToDelete && (
-            <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setEventToDelete(null)}
-                className="absolute inset-0 bg-brand-navy/60 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl p-8 text-center"
-              >
-                <div className="w-16 h-16 bg-red-50 text-red-500 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                  <Trash2 className="w-8 h-8" />
-                </div>
-                <h3 className="text-xl font-bold text-brand-navy mb-2">Delete Event?</h3>
-                <p className="text-gray-500 mb-8">
-                  Are you sure you want to delete the event <span className="font-bold text-gray-900">{eventToDelete.title}</span>? All participants and planning data will be lost.
-                </p>
-                <div className="grid grid-cols-2 gap-3">
-                  <button 
-                    onClick={() => setEventToDelete(null)}
-                    className="px-6 py-3 rounded-xl font-bold text-gray-400 hover:bg-gray-100 transition-all font-sans"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={confirmDeleteEvent}
-                    className="px-6 py-3 rounded-xl font-bold bg-red-500 text-white shadow-lg shadow-red-200 hover:bg-red-600 active:scale-95 transition-all font-sans"
-                  >
-                    Yes, Delete
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-        {/* Event Modal */}
-        <AnimatePresence>
-          {isEventModalOpen && (
-            <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setIsEventModalOpen(false)}
-                className="absolute inset-0 bg-brand-navy/60 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: 20 }}
-                className="relative w-full max-w-2xl bg-white rounded-[2rem] shadow-2xl overflow-hidden flex flex-col"
-              >
-                <div className="p-6 bg-brand-navy text-white flex justify-between items-center">
-                  <h2 className="text-2xl font-bold flex items-center gap-3">
-                    <CalendarIcon className="w-6 h-6 text-brand-orange" />
-                    New Event
-                  </h2>
-                  <button onClick={() => setIsEventModalOpen(false)} className="p-2 hover:bg-white/10 rounded-full transition-all">
-                    <X className="w-6 h-6" />
-                  </button>
-                </div>
-
-                <div className="p-8 space-y-8 overflow-y-auto max-h-[80vh]">
-                  {eventError && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: -10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm font-bold flex items-center gap-2"
-                    >
-                      <X className="w-4 h-4" />
-                      {eventError}
-                    </motion.div>
-                  )}
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                       <label className="text-xs font-bold uppercase text-gray-500 tracking-wider">Event Title</label>
-                       <input 
-                         type="text"
-                         placeholder="e.g. Fall Kickoff Celebration"
-                         className="w-full bg-gray-50 border-gray-100 border rounded-xl px-4 py-3 font-bold focus:ring-2 focus:ring-brand-orange outline-none"
-                         value={editingEvent.title}
-                         onChange={e => setEditingEvent({ ...editingEvent, title: e.target.value })}
-                       />
-                    </div>
-
-                    <div className="space-y-3">
-                       <label className="text-xs font-bold uppercase text-gray-500 tracking-wider">
-                         Event Date
-                       </label>
-                       <div className="flex gap-2">
-                         <input 
-                           type="date"
-                           className="flex-1 bg-gray-50 border-gray-100 border rounded-xl px-4 py-2 text-sm font-bold outline-none"
-                           value={editingEvent.eventDates?.[0] || ''}
-                           onChange={e => {
-                             const dateValue = e.target.value;
-                             
-                             // Auto-propose planning end date to day before the event date
-                             let planningUpdate = {};
-                             if (dateValue) {
-                               const eventD = new Date(dateValue + 'T12:00:00');
-                               eventD.setDate(eventD.getDate() - 1);
-                               planningUpdate = { planningEndDate: eventD.toISOString().split('T')[0] };
-                             }
-
-                             setEditingEvent({ 
-                               ...editingEvent, 
-                               eventDates: dateValue ? [dateValue] : [],
-                               ...planningUpdate
-                             });
-                           }}
-                         />
-                       </div>
-                    </div>
-
-                    <div className="p-6 bg-gray-50 rounded-2xl border border-gray-100 space-y-4">
-                       <h4 className="font-bold text-brand-navy flex items-center gap-2">
-                         <Clock className="w-4 h-4 text-brand-orange" />
-                         Planning Window
-                       </h4>
-                       <p className="text-xs text-gray-500 italic">Select the range when you need to find sync for planning meetings leading up to the event.</p>
-                       <div className="grid grid-cols-2 gap-4">
-                         <div className="space-y-1">
-                           <label className="text-[10px] font-bold text-gray-400 uppercase">Start Date</label>
-                           <input 
-                             type="date"
-                             className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm font-bold outline-none"
-                             value={editingEvent.planningStartDate}
-                             onChange={e => setEditingEvent({ ...editingEvent, planningStartDate: e.target.value })}
-                           />
-                         </div>
-                         <div className="space-y-1">
-                           <label className="text-[10px] font-bold text-gray-400 uppercase">End Date</label>
-                           <input 
-                             type="date"
-                             className="w-full bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm font-bold outline-none"
-                             value={editingEvent.planningEndDate}
-                             onChange={e => setEditingEvent({ ...editingEvent, planningEndDate: e.target.value })}
-                           />
-                         </div>
-                       </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-6 border-t border-gray-100 bg-gray-50 flex justify-between gap-3">
-                  {editingEvent.id ? (
-                    <button 
-                      onClick={() => {
-                        handleDeleteEvent(editingEvent.id!);
-                        setIsEventModalOpen(false);
-                      }}
-                      className="px-6 py-2 rounded-xl text-red-500 font-bold hover:bg-red-50 transition-all flex items-center gap-2"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      Delete Event
-                    </button>
-                  ) : <div></div>}
-                  <div className="flex gap-3">
-                    <button onClick={() => setIsEventModalOpen(false)} className="px-6 py-2 rounded-xl text-gray-400 font-bold hover:bg-gray-100 transition-all">Cancel</button>
-                    <button 
-                      onClick={handleSaveEvent} 
-                      className="px-8 py-2 rounded-xl bg-brand-orange text-white font-bold shadow-lg hover:bg-orange-600 transition-all"
-                    >
-                      {editingEvent.id ? 'Save Changes' : 'Create Event'}
-                    </button>
-                  </div>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-      </main>
-
-      {/* Profile Modal */}
-      <AnimatePresence>
-        {isProfileModalOpen && editingProfile && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsProfileModalOpen(false)}
-              className="absolute inset-0 bg-brand-navy/60 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-4xl bg-white rounded-[2rem] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
-            >
-              <div className="p-6 sm:p-8 bg-brand-navy text-white flex justify-between items-center">
-                <div>
-                  <h3 className="text-xl font-bold">{editingProfile.name ? 'Edit Profile' : 'New Employee Profile'}</h3>
-                  <p className="text-xs text-blue-200">Define repeating 2-week availability</p>
-                </div>
-                <button onClick={() => setIsProfileModalOpen(false)} className="p-2 hover:bg-white/10 rounded-full">
-                  <X className="w-6 h-6" />
-                </button>
+                {joinError && <p className="text-red-400 text-xs mt-2">{joinError}</p>}
               </div>
 
-              <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-8">
-                {profileError && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="p-4 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm font-bold flex items-center gap-2"
-                  >
-                    <X className="w-4 h-4" />
-                    {profileError}
+              <div>
+                <h2 className="font-bold text-white mb-4">Your Meeting Groups</h2>
+                {meetingGroups.length === 0 ? (
+                  <div className="text-center py-20 bg-white/5 rounded-3xl border border-dashed border-white/10">
+                    <CalendarIcon className="w-12 h-12 text-white/20 mx-auto mb-4" />
+                    <p className="text-white/40 font-medium">No meeting groups yet.</p>
+                    <p className="text-white/30 text-sm">Create one to get started.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {meetingGroups.map(group => {
+                      const submitted = group.participants?.length || 0;
+                      const total = group.expectedCount;
+                      const pct = Math.round((submitted / total) * 100);
+                      return (
+                        <motion.div key={group.id} whileHover={{ y: -2 }} onClick={() => { setActiveMeeting(group); setView('results'); }} className="bg-white/5 border border-white/10 rounded-2xl p-5 cursor-pointer hover:border-orange-500/40 transition-all">
+                          <div className="flex justify-between items-start mb-3">
+                            <div>
+                              <h3 className="font-bold text-white">{group.title}</h3>
+                              <p className="text-white/40 text-xs">by {group.creatorName}</p>
+                            </div>
+                            <div className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${submitted >= total ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'}`}>
+                              {submitted >= total ? 'Complete' : 'Pending'}
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between text-xs text-white/40">
+                              <span>{submitted} of {total} submitted</span>
+                              <span>Due {formatDate(group.deadline)}</span>
+                            </div>
+                            <div className="w-full bg-white/10 rounded-full h-1.5">
+                              <div className="bg-orange-500 h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }}></div>
+                            </div>
+                          </div>
+                        </motion.div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {/* CREATE */}
+          {view === 'create' && (
+            <motion.div key="create" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="max-w-xl mx-auto">
+              <div className="flex items-center gap-3 mb-8">
+                <button onClick={() => setView('home')} className="p-2 hover:bg-white/10 rounded-xl transition-all"><ChevronRight className="w-5 h-5 rotate-180" /></button>
+                <div>
+                  <h2 className="text-2xl font-bold">Create Meeting Group</h2>
+                  <p className="text-white/40 text-sm">Set up your group then share the join link</p>
+                </div>
+              </div>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Meeting Title</label>
+                  <input type="text" placeholder="e.g. June Planning Sessions" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white placeholder-white/20 outline-none focus:border-orange-500" value={createForm.title} onChange={e => setCreateForm({ ...createForm, title: e.target.value })} />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Your Name</label>
+                    <input type="text" placeholder="Adam" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white placeholder-white/20 outline-none focus:border-orange-500" value={createForm.creatorName} onChange={e => setCreateForm({ ...createForm, creatorName: e.target.value })} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Your Email</label>
+                    <input type="email" placeholder="adam@elevate.org" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white placeholder-white/20 outline-none focus:border-orange-500" value={createForm.creatorEmail} onChange={e => setCreateForm({ ...createForm, creatorEmail: e.target.value })} />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Submission Deadline</label>
+                    <input type="date" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white outline-none focus:border-orange-500" value={createForm.deadline} onChange={e => setCreateForm({ ...createForm, deadline: e.target.value })} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Expected Participants</label>
+                    <select className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white outline-none focus:border-orange-500 appearance-none" value={createForm.expectedCount} onChange={e => setCreateForm({ ...createForm, expectedCount: parseInt(e.target.value) })}>
+                      {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n} people</option>)}
+                    </select>
+                  </div>
+                </div>
+                <button disabled={!createForm.title || !createForm.creatorName || !createForm.creatorEmail || !createForm.deadline} onClick={handleCreateMeeting} className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2">
+                  <Plus className="w-5 h-5" />Create & Get Shareable Link
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* SUBMIT */}
+          {view === 'submit' && activeMeeting && (
+            <motion.div key="submit" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="max-w-xl mx-auto">
+              <div className="text-center mb-8">
+                <div className="inline-flex items-center gap-2 bg-orange-500/20 text-orange-400 px-4 py-2 rounded-full text-sm font-bold mb-4">
+                  <CalendarIcon className="w-4 h-4" />{activeMeeting.title}
+                </div>
+                <h2 className="text-3xl font-bold mb-2">
+                  {submitStep === 'input' && (hasMic ? 'Speak Your Availability' : 'Type Your Availability')}
+                  {submitStep === 'review' && 'Review Your Schedule'}
+                  {submitStep === 'editing' && (editingSlot !== null ? 'Edit Time' : 'Make a Correction')}
+                  {submitStep === 'done' && "You're Submitted!"}
+                </h2>
+                <p className="text-white/40 text-sm">
+                  {submitStep === 'input' && (hasMic ? 'Hit record and speak naturally. Be specific about dates and times.' : 'Type your availability below. Be specific about dates and times.')}
+                  {submitStep === 'review' && 'Does this look right? Submit or make corrections below.'}
+                  {submitStep === 'editing' && (editingSlot !== null ? 'Adjust the time. The date cannot be changed here.' : 'Speak or type your correction and we\'ll update your schedule.')}
+                </p>
+              </div>
+
+              <AnimatePresence mode="wait">
+
+                {/* INPUT STEP */}
+                {submitStep === 'input' && (
+                  <motion.div key="input" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-6">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Your Name</label>
+                      <input type="text" placeholder="e.g. Mandy" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white placeholder-white/20 outline-none focus:border-orange-500" value={participantName} onChange={e => setParticipantName(e.target.value)} />
+                    </div>
+
+                    {/* Example */}
+                    <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                      <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Example</p>
+                      <p className="text-white/50 text-sm italic">"I'm available every Monday in June from 9am to 2pm. Also free June 4th, 5th, and 6th from 11am to 4pm. Not available June 8th. Available 2pm to 6pm every Saturday and Sunday in July, except July 4th."</p>
+                    </div>
+
+                    {hasMic ? (
+                      <>
+                        <div className="flex flex-col items-center gap-4">
+                          <motion.button whileTap={{ scale: 0.95 }} onClick={isRecording ? stopRecording : startRecording} className={`w-28 h-28 rounded-full flex flex-col items-center justify-center text-white shadow-lg transition-all gap-2 ${isRecording ? 'bg-red-500' : 'bg-orange-500 hover:bg-orange-600'}`}>
+                            {isRecording ? <><MicOff className="w-10 h-10" /><span className="text-xs font-bold">Stop</span></> : <><Mic className="w-10 h-10" /><span className="text-xs font-bold">Record</span></>}
+                          </motion.button>
+                          {isRecording && (
+                            <div className="flex items-center gap-2 text-red-400 text-sm font-bold animate-pulse">
+                              <div className="w-2 h-2 rounded-full bg-red-400"></div>
+                              Recording...
+                            </div>
+                          )}
+                        </div>
+
+                        {transcript && (
+                          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                            <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">What we heard</p>
+                            <p className="text-white/80 text-sm leading-relaxed">{transcript}</p>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-blue-400 text-xs">
+                          <Keyboard className="w-4 h-4 shrink-0" />
+                          No microphone detected — type your availability below instead.
+                        </div>
+                        <textarea
+                          rows={5}
+                          placeholder="I'm available every Monday in June from 9am to 2pm. Not available June 8th..."
+                          className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/20 outline-none focus:border-orange-500 text-sm leading-relaxed resize-none"
+                          value={textInput}
+                          onChange={e => setTextInput(e.target.value)}
+                        />
+                      </div>
+                    )}
+
+                    {submitError && (
+                      <div className="flex items-center gap-2 text-red-400 text-sm bg-red-500/10 rounded-xl p-3">
+                        <AlertCircle className="w-4 h-4 shrink-0" />{submitError}
+                      </div>
+                    )}
+
+                    <button
+                      disabled={(!transcript && !textInput) || !participantName || isParsing}
+                      onClick={handleProcessInput}
+                      className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
+                    >
+                      {isParsing ? <><Loader2 className="w-5 h-5 animate-spin" />Analyzing your availability...</> : <><Send className="w-5 h-5" />Process My Schedule</>}
+                    </button>
                   </motion.div>
                 )}
-                
-                {/* Schedule Tabs */}
-                <div className="flex gap-2 p-1 bg-gray-100 rounded-2xl">
-                  <button 
-                    onClick={() => setActiveEditingSchedule(1)}
-                    className={`flex-1 py-3 text-sm font-bold rounded-xl transition-all ${activeEditingSchedule === 1 ? 'bg-white shadow-sm text-brand-navy' : 'text-gray-500 hover:text-gray-700'}`}
-                  >
-                    Schedule One (Base)
-                  </button>
-                  <button 
-                    onClick={() => {
-                      if (!editingProfile.hasScheduleTwo) {
-                        setEditingProfile({
-                          ...editingProfile,
-                          hasScheduleTwo: true,
-                          scheduleTwo: {
-                            startDate: getSundays()[1], // Default to next Sunday
-                            availability: JSON.parse(JSON.stringify(editingProfile.availability)) // Copy current as base
-                          }
-                        });
-                      }
-                      setActiveEditingSchedule(2);
-                    }}
-                    className={`flex-1 py-3 text-sm font-bold rounded-xl transition-all ${activeEditingSchedule === 2 ? 'bg-white shadow-sm text-brand-navy' : 'text-gray-500 hover:text-gray-700'}`}
-                  >
-                    Schedule Two {editingProfile.hasScheduleTwo ? '' : '(Add)'}
-                  </button>
-                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 bg-gray-50 rounded-2xl border border-gray-100">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-wider text-gray-500 px-1">Member Name</label>
-                    <input 
-                      type="text"
-                      placeholder="e.g. Anyea"
-                      className="w-full bg-white border-gray-200 border rounded-xl px-4 py-3 focus:ring-2 focus:ring-brand-orange outline-none"
-                      value={editingProfile.name}
-                      onChange={(e) => setEditingProfile({ ...editingProfile, name: e.target.value })}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-wider text-gray-500 px-1">
-                      {activeEditingSchedule === 1 ? 'Schedule One Start Date' : 'Schedule Two Transitions On'}
-                    </label>
-                    <select
-                      className="w-full bg-white border-gray-200 border rounded-xl px-4 py-3 focus:ring-2 focus:ring-brand-orange outline-none bg-none appearance-none cursor-pointer font-bold"
-                      value={activeEditingSchedule === 1 ? (editingProfile.startDate || getSundays()[0]) : (editingProfile.scheduleTwo?.startDate || getSundays()[1])} 
-                      onChange={(e) => {
-                        if (activeEditingSchedule === 1) {
-                          setEditingProfile({ ...editingProfile, startDate: e.target.value });
-                        } else {
-                          setEditingProfile({ 
-                            ...editingProfile, 
-                            scheduleTwo: { 
-                              ...editingProfile.scheduleTwo!, 
-                              startDate: e.target.value 
-                            } 
-                          });
-                        }
-                      }}
-                    >
-                      {getSundays().map(sunday => {
-                        const d = new Date(sunday + 'T12:00:00');
-                        return (
-                          <option key={sunday} value={sunday}>
-                            {d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })}
-                          </option>
-                        );
-                      })}
-                    </select>
-                    <p className="text-[10px] text-gray-400 px-1 italic">
-                      {activeEditingSchedule === 1 
-                        ? 'The Sunday that marks the start of this member\'s repeating 2-week cycle.' 
-                        : 'On this date, Schedule Two will permanently replace Schedule One for all future comparisons.'}
-                    </p>
-                  </div>
-                </div>
+                {/* REVIEW STEP */}
+                {submitStep === 'review' && (
+                  <motion.div key="review" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-6">
 
-                <div className="space-y-6">
-                  <div className="flex items-center gap-3">
-                    <h4 className="font-bold text-gray-900">
-                      {activeEditingSchedule === 1 ? 'Schedule One' : 'Schedule Two'} Availability
-                    </h4>
-                    {activeEditingSchedule === 2 && (
-                      <button 
-                        onClick={() => {
-                          setEditingProfile({ ...editingProfile, hasScheduleTwo: false, scheduleTwo: undefined });
-                          setActiveEditingSchedule(1);
-                        }}
-                        className="text-xs font-bold text-red-500 hover:underline"
-                      >
-                        Remove Schedule Two
-                      </button>
-                    )}
-                    <div className="h-px flex-1 bg-gray-100"></div>
-                  </div>
-                  
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
-                    <WeekScheduleEditor 
-                      title="Week One" 
-                      subtitle="Schedule"
-                      schedule={activeEditingSchedule === 1 ? editingProfile.availability.weekA : editingProfile.scheduleTwo!.availability.weekA} 
-                      onChange={(s) => {
-                        if (activeEditingSchedule === 1) {
-                          setEditingProfile({
-                            ...editingProfile,
-                            availability: { ...editingProfile.availability, weekA: s }
-                          });
-                        } else {
-                          setEditingProfile({
-                            ...editingProfile,
-                            scheduleTwo: {
-                              ...editingProfile.scheduleTwo!,
-                              availability: { ...editingProfile.scheduleTwo!.availability, weekA: s }
-                            }
-                          });
-                        }
-                      }} 
-                    />
-                    <WeekScheduleEditor 
-                      title="Week Two" 
-                      subtitle="Schedule"
-                      schedule={activeEditingSchedule === 1 ? editingProfile.availability.weekB : editingProfile.scheduleTwo!.availability.weekB} 
-                      onChange={(s) => {
-                        if (activeEditingSchedule === 1) {
-                          setEditingProfile({
-                            ...editingProfile,
-                            availability: { ...editingProfile.availability, weekB: s }
-                          });
-                        } else {
-                          setEditingProfile({
-                            ...editingProfile,
-                            scheduleTwo: {
-                              ...editingProfile.scheduleTwo!,
-                              availability: { ...editingProfile.scheduleTwo!.availability, weekB: s }
-                            }
-                          });
-                        }
-                      }} 
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-between items-center gap-3">
-                <button 
-                  type="button"
-                  onClick={() => {
-                    handleDeleteProfile(editingProfile.id);
-                    setIsProfileModalOpen(false);
-                  }}
-                  className="px-4 py-2 text-sm font-bold text-red-500 hover:bg-red-50 rounded-xl transition-all flex items-center gap-2"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Delete Member
-                </button>
-                <div className="flex gap-3">
-                  <button 
-                    onClick={() => setIsProfileModalOpen(false)}
-                    className="px-6 py-2.5 rounded-xl font-bold text-gray-500 hover:bg-gray-100 transition-all"
-                  >
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={() => handleSaveProfile(editingProfile)}
-                    className="px-8 py-2.5 rounded-xl font-bold bg-brand-orange text-white shadow-sm hover:bg-orange-600 transition-all flex items-center gap-2"
-                  >
-                    <Save className="w-5 h-5" />
-                    Save Member
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-// --- Sub-Components ---
-
-function TabButton({ active, onClick, children, icon }: { active: boolean; onClick: () => void; children: React.ReactNode; icon: React.ReactNode }) {
-  return (
-    <button 
-      onClick={onClick}
-      className={`px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-all ${
-        active 
-          ? 'bg-white text-brand-navy shadow-sm' 
-          : 'text-white/70 hover:text-white hover:bg-white/5'
-      }`}
-    >
-      {icon}
-      {children}
-    </button>
-  );
-}
-
-interface ProfileCardProps {
-  key?: React.Key;
-  profile: Profile;
-  onEdit: () => void;
-  onDelete: () => void;
-}
-
-function ProfileCard({ profile, onEdit, onDelete }: ProfileCardProps): React.JSX.Element {
-  const anchorDateObj = new Date(profile.startDate + 'T12:00:00');
-  
-  return (
-    <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden group hover:shadow-md transition-all">
-      <div className="p-6">
-        <div className="flex justify-between items-start mb-4">
-          <div className="flex flex-col gap-1">
-            <div className="w-12 h-12 rounded-2xl bg-brand-orange/10 flex items-center justify-center text-brand-orange">
-               <Users className="w-6 h-6" />
-            </div>
-            <div className="mt-2 text-[10px] font-bold text-gray-400 uppercase tracking-widest leading-none">
-              Starts: {anchorDateObj.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-            </div>
-          </div>
-          <div className="flex items-start gap-1 relative z-20">
-            <button 
-              onClick={(e) => {
-                e.stopPropagation();
-                onEdit();
-              }} 
-              className="p-3 text-gray-400 hover:text-brand-navy hover:bg-gray-50 rounded-xl transition-all"
-            >
-              <Edit2 className="w-4 h-4" />
-            </button>
-            <button 
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete();
-              }} 
-              className="p-3 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
-            >
-              <Trash2 className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-xl font-bold text-gray-900">{profile.name}</h3>
-          {profile.hasScheduleTwo && (
-            <span className="px-2 py-0.5 bg-blue-50 text-blue-600 text-[9px] font-bold rounded-md border border-blue-100">
-              MULTI-SCHEDULE
-            </span>
-          )}
-        </div>
-        
-        {profile.hasScheduleTwo && (
-          <div className="mb-4 p-2 bg-blue-50/30 rounded-xl border border-blue-100/50">
-             <p className="text-[10px] text-blue-600 font-bold uppercase flex items-center gap-1">
-               <Clock className="w-3 h-3" />
-               Transitions {new Date(profile.scheduleTwo!.startDate + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-             </p>
-          </div>
-        )}
-        <div className="grid grid-cols-2 gap-2">
-           <div className="bg-gray-50 p-2 rounded-xl text-center">
-              <p className="text-[10px] font-bold text-gray-400 uppercase">Week One Active</p>
-              <p className="text-sm font-bold text-brand-navy">{Object.values(profile.availability.weekA).filter(slots => slots.length > 0).length} Days</p>
-           </div>
-           <div className="bg-gray-50 p-2 rounded-xl text-center">
-              <p className="text-[10px] font-bold text-gray-400 uppercase">Week Two Active</p>
-              <p className="text-sm font-bold text-brand-navy">{Object.values(profile.availability.weekB).filter(slots => slots.length > 0).length} Days</p>
-           </div>
-        </div>
-      </div>
-      <button 
-        onClick={onEdit}
-        className="w-full bg-gray-50 py-3 text-xs font-bold text-gray-500 hover:bg-brand-navy hover:text-white transition-all flex items-center justify-center gap-2"
-      >
-        View Detailed Schedule
-        <ChevronRight className="w-3 h-3" />
-      </button>
-    </div>
-  );
-}
-
-function WeekScheduleEditor({ title, subtitle, schedule, onChange }: { title: string; subtitle: string; schedule: DailySchedule; onChange: (s: DailySchedule) => void }) {
-  return (
-    <div className="space-y-4">
-      <div>
-        <h5 className="font-bold text-brand-navy">{title}</h5>
-        <p className="text-xs text-gray-400 font-medium">{subtitle}</p>
-      </div>
-      <div className="space-y-3">
-        {DAYS.map(day => {
-          const slots = schedule[day.value] || [];
-          const isActive = slots.length > 0;
-          
-          return (
-            <div key={day.value} className={`p-4 rounded-2xl border transition-all ${isActive ? 'bg-white border-brand-orange/30 shadow-sm' : 'bg-gray-50/50 border-gray-100'}`}>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div 
-                      onClick={() => {
-                          const newSched = { ...schedule };
-                          if (isActive) {
-                            newSched[day.value] = [];
-                          } else {
-                            newSched[day.value] = [{ start: '09:00', end: '17:00' }];
-                          }
-                          onChange(newSched);
-                      }}
-                      className={`w-6 h-6 rounded-full border-2 flex items-center justify-center cursor-pointer transition-all ${isActive ? 'bg-brand-orange border-brand-orange text-white' : 'border-gray-300 bg-white'}`}
-                    >
-                      {isActive && <CheckCircle2 className="w-4 h-4" />}
-                    </div>
-                    <span className={`font-bold ${isActive ? 'text-gray-900' : 'text-gray-400'}`}>{day.label}</span>
-                  </div>
-
-                  {!isActive && (
-                    <span className="text-[10px] font-bold text-gray-300 uppercase tracking-widest italic">Unavailable</span>
-                  )}
-                  
-                  {isActive && (
-                    <button 
-                      onClick={() => {
-                        const newSched = { ...schedule };
-                        newSched[day.value] = [...slots, { start: '09:00', end: '17:00' }];
-                        onChange(newSched);
-                      }}
-                      className="text-[10px] font-bold text-brand-orange uppercase hover:underline"
-                    >
-                      + Add Slot
-                    </button>
-                  )}
-                </div>
-
-                {isActive && (
-                  <div className="space-y-2">
-                    {slots.map((slot, index) => (
-                      <div key={index} className="flex items-center gap-2 bg-gray-100 p-1 pl-2 rounded-xl">
-                        <input 
-                          type="time" 
-                          className="bg-transparent border-none text-xs font-bold px-1 focus:ring-0" 
-                          value={slot.start}
-                          onChange={(e) => {
-                            const newSlots = [...slots];
-                            newSlots[index] = { ...slot, start: e.target.value };
-                            onChange({ ...schedule, [day.value]: newSlots });
-                          }}
-                        />
-                        <span className="text-gray-400 font-bold px-1">-</span>
-                        <input 
-                          type="time" 
-                          className="bg-transparent border-none text-xs font-bold px-1 focus:ring-0" 
-                          value={slot.end}
-                          onChange={(e) => {
-                            const newSlots = [...slots];
-                            newSlots[index] = { ...slot, end: e.target.value };
-                            onChange({ ...schedule, [day.value]: newSlots });
-                          }}
-                        />
-                        {slots.length > 1 && (
-                          <button 
-                            onClick={() => {
-                              const newSlots = slots.filter((_, i) => i !== index);
-                              onChange({ ...schedule, [day.value]: newSlots });
-                            }}
-                            className="p-1 hover:bg-gray-200 rounded-lg text-gray-400 transition-colors"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        )}
+                    {/* Available dates */}
+                    {availableSlots.length > 0 && (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-green-400"></div>
+                          <p className="text-xs font-bold text-white/40 uppercase tracking-widest">You Are Available</p>
+                        </div>
+                        <div className="space-y-2">
+                          {availableSlots.map((slot, i) => {
+                            const originalIndex = parsedSlots.indexOf(slot);
+                            return (
+                              <motion.div
+                                key={i}
+                                whileHover={{ scale: 1.01 }}
+                                onMouseDown={() => handleLongPressStart(originalIndex, slot)}
+                                onMouseUp={handleLongPressEnd}
+                                onMouseLeave={handleLongPressEnd}
+                                onTouchStart={() => handleLongPressStart(originalIndex, slot)}
+                                onTouchEnd={handleLongPressEnd}
+                                onContextMenu={(e) => handleRightClick(e, originalIndex, slot)}
+                                className="flex items-center justify-between bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-3 cursor-pointer group select-none"
+                                title="Long press (mobile) or right-click (desktop) to edit time"
+                              >
+                                <div>
+                                  <p className="font-bold text-white text-sm">{formatDateFull(slot.date)}</p>
+                                  <p className="text-green-400 font-bold text-sm">{formatTime(slot.start)} – {formatTime(slot.end)}</p>
+                                </div>
+                                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button onClick={() => { setEditingSlot({ index: originalIndex, start: slot.start, end: slot.end }); setSubmitStep('editing'); }} className="p-1.5 hover:bg-white/10 rounded-lg transition-all" title="Edit time">
+                                    <Edit2 className="w-3.5 h-3.5 text-white/50" />
+                                  </button>
+                                  <button onClick={() => handleRemoveSlot(originalIndex)} className="p-1.5 hover:bg-red-500/20 rounded-lg transition-all" title="Remove">
+                                    <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                  </button>
+                                </div>
+                              </motion.div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] text-white/20 text-center">Long press (mobile) or right-click (desktop) a date to edit its time</p>
                       </div>
+                    )}
+
+                    {/* Unavailable dates */}
+                    {unavailableSlots.length > 0 && (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-red-400"></div>
+                          <p className="text-xs font-bold text-white/40 uppercase tracking-widest">You Are NOT Available</p>
+                        </div>
+                        <div className="space-y-2">
+                          {unavailableSlots.map((slot, i) => {
+                            const originalIndex = parsedSlots.indexOf(slot);
+                            return (
+                              <div key={i} className="flex items-center justify-between bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 group">
+                                <p className="font-bold text-white/60 text-sm line-through">{formatDateFull(slot.date)}</p>
+                                <button onClick={() => handleRemoveSlot(originalIndex)} className="p-1.5 hover:bg-red-500/20 rounded-lg transition-all opacity-0 group-hover:opacity-100">
+                                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {parsedSlots.length === 0 && (
+                      <div className="text-center py-8 bg-white/5 rounded-2xl border border-dashed border-white/10">
+                        <p className="text-red-400 text-sm">Nothing was parsed. Try re-recording with clearer dates and times.</p>
+                      </div>
+                    )}
+
+                    {/* Action buttons */}
+                    <div className="space-y-3">
+                      <button
+                        onClick={() => { setSubmitStep('editing'); setEditingSlot(null); setEditTranscript(''); setEditTextInput(''); }}
+                        className="w-full py-3 rounded-xl font-bold text-white border border-white/10 hover:bg-white/10 transition-all flex items-center justify-center gap-2"
+                      >
+                        <Edit2 className="w-4 h-4" />Make a Correction
+                      </button>
+                      <div className="grid grid-cols-2 gap-3">
+                        <button onClick={resetSubmit} className="py-3 rounded-xl font-bold text-white/40 hover:bg-white/10 transition-all border border-white/10">
+                          Start Over
+                        </button>
+                        <button
+                          disabled={parsedSlots.length === 0}
+                          onClick={handleSubmitAvailability}
+                          className="bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
+                        >
+                          <Check className="w-5 h-5" />Submit Schedule
+                        </button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* EDITING STEP */}
+                {submitStep === 'editing' && (
+                  <motion.div key="editing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-6">
+
+                    {editingSlot !== null ? (
+                      // Inline time editor for a specific slot
+                      <div className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4">
+                        <div className="text-center">
+                          <p className="text-white/40 text-sm mb-1">Editing time for</p>
+                          <p className="font-bold text-white text-lg">{formatDateFull(parsedSlots[editingSlot.index]?.date)}</p>
+                          <p className="text-white/30 text-xs mt-1">Date cannot be changed here — use corrections to add/remove dates</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Start Time</label>
+                            <input type="time" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white outline-none focus:border-orange-500" value={editingSlot.start} onChange={e => setEditingSlot({ ...editingSlot, start: e.target.value })} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-xs font-bold uppercase text-white/40 tracking-wider">End Time</label>
+                            <input type="time" className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white outline-none focus:border-orange-500" value={editingSlot.end} onChange={e => setEditingSlot({ ...editingSlot, end: e.target.value })} />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button onClick={() => { setEditingSlot(null); setSubmitStep('review'); }} className="py-3 rounded-xl font-bold text-white/40 hover:bg-white/10 transition-all border border-white/10">Cancel</button>
+                          <button onClick={handleSaveSlotEdit} className="bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all flex items-center justify-center gap-2">
+                            <Check className="w-4 h-4" />Save Time
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      // Voice/text correction editor
+                      <div className="space-y-4">
+                        <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                          <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Correction Examples</p>
+                          <ul className="text-white/40 text-sm space-y-1">
+                            <li>"June 4th should be not available"</li>
+                            <li>"Change June 3rd time to 2pm to 6pm"</li>
+                            <li>"Add July 15th from 10am to 3pm"</li>
+                            <li>"Remove June 10th"</li>
+                          </ul>
+                        </div>
+
+                        {hasMic ? (
+                          <>
+                            <div className="flex flex-col items-center gap-4">
+                              <motion.button whileTap={{ scale: 0.95 }} onClick={isEditRecording ? stopEditRecording : startEditRecording} className={`w-24 h-24 rounded-full flex flex-col items-center justify-center text-white shadow-lg transition-all gap-1 ${isEditRecording ? 'bg-red-500' : 'bg-orange-500 hover:bg-orange-600'}`}>
+                                {isEditRecording ? <><MicOff className="w-8 h-8" /><span className="text-[10px] font-bold">Stop</span></> : <><Mic className="w-8 h-8" /><span className="text-[10px] font-bold">Speak</span></>}
+                              </motion.button>
+                              {isEditRecording && <div className="flex items-center gap-2 text-red-400 text-sm font-bold animate-pulse"><div className="w-2 h-2 rounded-full bg-red-400"></div>Recording correction...</div>}
+                            </div>
+                            {editTranscript && (
+                              <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                                <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Correction heard</p>
+                                <p className="text-white/80 text-sm">{editTranscript}</p>
+                              </div>
+                            )}
+                            <p className="text-center text-white/30 text-xs">— or type it instead —</p>
+                          </>
+                        ) : null}
+
+                        <textarea
+                          rows={3}
+                          placeholder="Type your correction here..."
+                          className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/20 outline-none focus:border-orange-500 text-sm resize-none"
+                          value={editTextInput}
+                          onChange={e => setEditTextInput(e.target.value)}
+                        />
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <button onClick={() => setSubmitStep('review')} className="py-3 rounded-xl font-bold text-white/40 hover:bg-white/10 transition-all border border-white/10">Back</button>
+                          <button
+                            disabled={(!editTranscript && !editTextInput) || isEditParsing}
+                            onClick={handleApplyEdit}
+                            className="bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
+                          >
+                            {isEditParsing ? <><Loader2 className="w-4 h-4 animate-spin" />Applying...</> : <><Check className="w-4 h-4" />Apply Correction</>}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+
+                {/* DONE STEP */}
+                {submitStep === 'done' && (
+                  <motion.div key="done" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="text-center py-12 space-y-4">
+                    <div className="w-20 h-20 bg-green-500/20 rounded-full flex items-center justify-center mx-auto">
+                      <CheckCircle2 className="w-10 h-10 text-green-400" />
+                    </div>
+                    <h3 className="text-2xl font-bold">Schedule Submitted!</h3>
+                    <p className="text-white/40">Your availability is in. The organizer will be notified once everyone has responded.</p>
+                    <button onClick={() => { setView('home'); resetSubmit(); setActiveMeeting(null); }} className="bg-white/10 text-white px-6 py-2.5 rounded-xl font-bold hover:bg-white/20 transition-all">Back to Home</button>
+                  </motion.div>
+                )}
+
+              </AnimatePresence>
+            </motion.div>
+          )}
+
+          {/* RESULTS */}
+          {view === 'results' && activeMeeting && (
+            <motion.div key="results" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-8">
+              <div className="bg-white/5 border border-white/10 rounded-3xl p-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <button onClick={() => { setView('home'); setActiveMeeting(null); }} className="p-1 hover:bg-white/10 rounded-lg transition-all"><ChevronRight className="w-4 h-4 rotate-180 text-white/40" /></button>
+                      <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Meeting Group</p>
+                    </div>
+                    <h2 className="text-2xl font-bold">{activeMeeting.title}</h2>
+                    <p className="text-white/40 text-sm">Created by {activeMeeting.creatorName} · Due {formatDate(activeMeeting.deadline)}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => copyJoinLink(activeMeeting.id)} className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
+                      {copiedId === activeMeeting.id ? <><Check className="w-4 h-4 text-green-400" />Copied!</> : <><Copy className="w-4 h-4" />Copy Join Link</>}
+                    </button>
+                    <button onClick={() => { setView('submit'); resetSubmit(); }} className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
+                      <Mic className="w-4 h-4" />Submit Mine
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  <div className="flex justify-between text-xs text-white/40">
+                    <span>{activeMeeting.participants?.length || 0} of {activeMeeting.expectedCount} submitted</span>
+                    <span>{(activeMeeting.participants?.length || 0) >= activeMeeting.expectedCount ? '✅ Everyone responded!' : `Waiting on ${activeMeeting.expectedCount - (activeMeeting.participants?.length || 0)} more...`}</span>
+                  </div>
+                  <div className="w-full bg-white/10 rounded-full h-2">
+                    <div className="bg-orange-500 h-2 rounded-full transition-all" style={{ width: `${Math.round(((activeMeeting.participants?.length || 0) / activeMeeting.expectedCount) * 100)}%` }}></div>
+                  </div>
+                </div>
+
+                {activeMeeting.participants?.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {activeMeeting.participants.map(p => (
+                      <span key={p.id} className="inline-flex items-center gap-1.5 bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs font-bold">
+                        <CheckCircle2 className="w-3 h-3" />{p.name}
+                      </span>
                     ))}
                   </div>
                 )}
               </div>
-            </div>
-          );
-        })}
-      </div>
+
+              {(activeMeeting.participants?.length || 0) >= 2 ? (
+                <div className="space-y-8">
+                  <section>
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="h-px flex-1 bg-white/10"></div>
+                      <h3 className="text-xs font-bold text-white/30 uppercase tracking-widest px-3">Everyone Available</h3>
+                      <div className="h-px flex-1 bg-white/10"></div>
+                    </div>
+                    {fullMatches.length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {fullMatches.map((result, i) => <SyncCard key={i} result={result} totalCount={activeMeeting.participants.length} />)}
+                      </div>
+                    ) : (
+                      <div className="text-center py-10 bg-white/5 rounded-2xl border border-dashed border-white/10">
+                        <p className="text-white/30 text-sm">No dates yet where everyone overlaps.</p>
+                      </div>
+                    )}
+                  </section>
+
+                  {partialMatches.length > 0 && (
+                    <section>
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="h-px flex-1 bg-white/10"></div>
+                        <h3 className="text-xs font-bold text-white/30 uppercase tracking-widest px-3">Partial Availability</h3>
+                        <div className="h-px flex-1 bg-white/10"></div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 opacity-70">
+                        {partialMatches.map((result, i) => <SyncCard key={i} result={result} totalCount={activeMeeting.participants.length} />)}
+                      </div>
+                    </section>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center py-20 bg-white/5 rounded-3xl border border-dashed border-white/10">
+                  <Users className="w-12 h-12 text-white/20 mx-auto mb-4" />
+                  <h3 className="text-lg font-bold text-white/60">Waiting for responses</h3>
+                  <p className="text-white/30 text-sm max-w-xs mx-auto mt-2">Share the join link with your team. Sync results appear automatically once at least 2 people submit.</p>
+                </div>
+              )}
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </main>
     </div>
   );
 }
 
-interface ResultCardProps {
-  key?: React.Key;
-  result: SyncResult;
-  profiles: Profile[];
-  totalSelected?: number;
-}
-
-function ResultCard({ result, profiles, totalSelected }: ResultCardProps): React.JSX.Element {
-  const isFull = result.matchType === 'full';
-  const displayDate = result.date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-  const [dayName, ...dateParts] = displayDate.split(', ');
-  
+// --- Sync Card ---
+function SyncCard({ result, totalCount }: { result: SyncResult; totalCount: number }) {
   return (
-    <motion.div 
-      whileHover={{ y: -4 }}
-      className={`bg-white rounded-3xl shadow-sm border overflow-hidden p-6 ${isFull ? 'border-brand-orange/40 ring-1 ring-brand-orange/10' : 'border-gray-100'}`}
-    >
-      <div className="flex justify-between items-start mb-6">
+    <motion.div whileHover={{ y: -3 }} className={`bg-white/5 border rounded-2xl p-5 ${result.isFull ? 'border-orange-500/40 ring-1 ring-orange-500/10' : 'border-white/10'}`}>
+      <div className="flex justify-between items-start mb-4">
         <div>
-           <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Group Sync</p>
-           <h3 className="text-xl font-extrabold text-brand-navy leading-tight">{dayName}</h3>
-           <p className="text-sm font-medium text-gray-500">{dateParts.join(', ')}</p>
+          <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-1">Available</p>
+          <h3 className="text-lg font-extrabold text-white">{formatDate(result.date)}</h3>
         </div>
-        <div className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${isFull ? 'bg-orange-500 text-white shadow-sm' : 'bg-brand-navy text-white opacity-80'}`}>
-           {isFull ? 'Everyone Free' : `${result.availableMembers.length} of ${totalSelected} Available`}
+        <div className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${result.isFull ? 'bg-orange-500 text-white' : 'bg-white/10 text-white/60'}`}>
+          {result.isFull ? 'All Free' : `${result.participantNames.length}/${totalCount}`}
         </div>
       </div>
-
-      {result.overlapRanges.length > 0 ? (
-        <div className="space-y-3 mb-6">
-          {result.overlapRanges.map((range, i) => (
-            <div key={i} className="bg-gray-50 rounded-2xl p-4 border border-gray-100">
-               <div className="flex items-center gap-3 text-brand-navy">
-                  <Clock className="w-5 h-5 text-brand-orange" />
-                  <div className="font-bold flex items-baseline gap-1">
-                     <span className="text-lg">{formatTime(range.start)}</span>
-                     <span className="text-xs text-gray-400">to</span>
-                     <span className="text-lg">{formatTime(range.end)}</span>
-                  </div>
-               </div>
-               <p className="text-[10px] font-bold text-gray-400 mt-2 uppercase">Common Availability Window</p>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="bg-red-50 rounded-2xl p-4 mb-6 border border-red-100 text-red-500">
-           <p className="text-xs font-bold uppercase flex items-center gap-2">
-             <X className="w-4 h-4" />
-             No Overlap Window
-           </p>
-           <p className="text-[10px] opacity-80 mt-1 italic">Members are free at different times.</p>
-        </div>
-      )}
-
-      <div className="space-y-3">
-        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{isFull ? 'Participants' : 'Available Now'}</p>
-        <div className="flex flex-wrap gap-2">
-           {result.availableMembers.map(id => {
-             const p = profiles.find(profile => profile.id === id);
-             return (
-               <span key={id} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 text-brand-navy text-[11px] font-bold border border-blue-100 shadow-sm">
-                  <div className="w-1.5 h-1.5 rounded-full bg-brand-orange"></div>
-                  {p?.name.split(' ')[0] || 'Member'}
-               </span>
-             );
-           })}
-        </div>
+      <div className="space-y-2 mb-4">
+        {result.slots.map((slot, i) => (
+          <div key={i} className="flex items-center gap-2 bg-white/5 rounded-xl px-3 py-2">
+            <Clock className="w-4 h-4 text-orange-400 shrink-0" />
+            <span className="text-white font-bold text-sm">{formatTime(slot.start)} – {formatTime(slot.end)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {result.participantNames.map((name, i) => (
+          <span key={i} className="bg-white/10 text-white/60 px-2 py-0.5 rounded-lg text-[11px] font-bold">{name.split(' ')[0]}</span>
+        ))}
       </div>
     </motion.div>
-  );
-}
-
-interface EventManagementCardProps {
-  key?: React.Key;
-  event: AppEvent;
-  isSelected: boolean;
-  onToggleSelect: () => void;
-  onEdit: () => void;
-  isPast?: boolean;
-}
-
-function EventManagementCard({ event, isSelected, onToggleSelect, onEdit, isPast }: EventManagementCardProps): React.JSX.Element {
-  const firstDateStr = event.eventDates?.[0] || event.planningStartDate;
-  const d = new Date(firstDateStr + 'T12:00:00');
-  
-  return (
-    <div 
-      className={`relative p-5 rounded-2xl border transition-all ${
-        isSelected 
-          ? 'bg-orange-50 border-brand-orange ring-1 ring-brand-orange/20' 
-          : 'bg-white border-gray-100 hover:border-gray-200 shadow-sm'
-      }`}
-    >
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-3">
-          <button 
-            type="button"
-            onClick={onToggleSelect}
-            className={`mt-1 w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${
-              isSelected ? 'bg-brand-orange border-brand-orange text-white' : 'border-gray-300 bg-white'
-            }`}
-          >
-            {isSelected && <CheckCircle2 className="w-4 h-4" />}
-          </button>
-          
-          <div onClick={onToggleSelect} className="cursor-pointer">
-            <h4 className="font-bold text-gray-900 leading-tight mb-1">{event.title}</h4>
-            <div className="flex items-center gap-2 text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-              <span>{d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
-              {isPast && <span className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500 lowercase tracking-normal">Past</span>}
-            </div>
-          </div>
-        </div>
-
-        <button 
-          onClick={(e) => {
-            e.stopPropagation();
-            onEdit();
-          }}
-          className="p-2 rounded-xl text-gray-400 hover:text-brand-navy hover:bg-gray-50 transition-all font-sans"
-        >
-          <Edit2 className="w-4 h-4" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function MenuIcon({ activeTab, setActiveTab, setEditingEvent, setIsEventModalOpen }: { 
-  activeTab: string; 
-  setActiveTab: (t: any) => void;
-  setEditingEvent: (e: any) => void;
-  setIsEventModalOpen: (o: boolean) => void;
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-  
-  return (
-    <div className="relative">
-      <button onClick={() => setIsOpen(!isOpen)} className="p-2 text-white">
-        {isOpen ? <X /> : <ChevronRight className="rotate-90" />}
-      </button>
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div 
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-xl border border-gray-100 p-2 z-[60]"
-          >
-              {[
-                { id: 'new-event', label: 'New Event', icon: <Plus className="w-4 h-4 text-brand-orange" />, action: () => {
-                  setEditingEvent({
-                    title: '',
-                    eventDates: [''],
-                    planningStartDate: new Date().toISOString().split('T')[0],
-                    planningEndDate: ''
-                  });
-                  setIsEventModalOpen(true);
-                }},
-                { id: 'sync', label: 'Calendar Sync', icon: <CalendarIcon className="w-4 h-4" /> },
-                { id: 'members', label: 'Members', icon: <Users className="w-4 h-4" /> },
-                { id: 'settings', label: 'Settings', icon: <SettingsIcon className="w-4 h-4" /> },
-              ].map(tab => (
-                <button
-                  key={tab.id}
-                  onClick={() => {
-                    if ('action' in tab && tab.action) {
-                      tab.action();
-                    } else {
-                      setActiveTab(tab.id as any);
-                    }
-                    setIsOpen(false);
-                  }}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all ${
-                    activeTab === tab.id 
-                      ? 'bg-blue-50 text-brand-navy' 
-                      : 'text-gray-600 hover:bg-gray-50'
-                  }`}
-                >
-                  {tab.icon}
-                  {tab.label}
-                </button>
-              ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
   );
 }
