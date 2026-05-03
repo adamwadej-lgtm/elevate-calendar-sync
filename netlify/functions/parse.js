@@ -35,19 +35,22 @@ exports.handler = async (event) => {
 
 Statement: "${transcript}"
 
-Return ONLY a JSON array. Each item must have:
-- "date": YYYY-MM-DD
-- "start": HH:mm (24hr) — use "00:00" if unavailable all day
-- "end": HH:mm (24hr) — use "00:00" if unavailable all day  
-- "unavailable": true ONLY if the person explicitly says they are NOT available that date
+Return ONLY a JSON object with two fields:
+1. "slots": an array where each item has:
+   - "date": YYYY-MM-DD
+   - "start": HH:mm (24hr) — use "00:00" if unavailable all day
+   - "end": HH:mm (24hr) — use "00:00" if unavailable all day  
+   - "unavailable": true ONLY if the person explicitly says they are NOT available that date
+2. "warnings": an array of strings for any issues found (can be empty)
 
 Rules:
 - Expand recurring patterns ("every Monday in June" = list each Monday)
 - Handle exclusions ("except June 8th" = mark June 8th as unavailable: true)
 - Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
+- CRITICAL: Validate day-of-week against the actual calendar date. If someone says "Monday June 8th" but June 8th is actually a Sunday, add a warning like "June 8th is actually a Sunday, not Monday. Used the date June 8th." Always use the DATE they specified, not the day name.
 - If merging with existing: apply corrections, keep everything else unchanged
 - "remove June 4th" = remove that date from results entirely
-- Return ONLY the JSON array, no explanation, no markdown backticks.`
+- Return ONLY the JSON object, no explanation, no markdown backticks.`
         }]
       })
     });

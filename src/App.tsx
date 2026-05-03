@@ -72,6 +72,7 @@ type MeetingGroup = {
   deadline: string;
   expectedCount: number;
   participants: Participant[];
+  archivedParticipants?: Participant[];
   createdAt: string;
   notified: boolean;
 };
@@ -115,7 +116,7 @@ const parseAvailabilityWithClaude = async (
   transcript: string,
   referenceDate: string,
   existingSlots: ParsedSlot[] = []
-): Promise<ParsedSlot[]> => {
+): Promise<{ slots: ParsedSlot[]; warnings: string[] }> => {
   const response = await fetch(PARSE_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -133,12 +134,20 @@ const parseAvailabilityWithClaude = async (
   }
 
   const data = await response.json();
-  const text = data.content?.[0]?.text || '[]';
+  const text = data.content?.[0]?.text || '{}';
   try {
     const clean = text.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
+    const parsed = JSON.parse(clean);
+    // Handle both old format (array) and new format (object with slots/warnings)
+    if (Array.isArray(parsed)) {
+      return { slots: parsed, warnings: [] };
+    }
+    return {
+      slots: parsed.slots || [],
+      warnings: parsed.warnings || [],
+    };
   } catch {
-    return existingSlots;
+    return { slots: existingSlots, warnings: [] };
   }
 };
 
@@ -196,6 +205,8 @@ export default function App() {
   const [joinError, setJoinError] = useState('');
   const [hasMic, setHasMic] = useState<boolean | null>(null);
   const [copiedId, setCopiedId] = useState('');
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editTitleValue, setEditTitleValue] = useState('');
 
   // Create form
   const [createForm, setCreateForm] = useState({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4 });
@@ -208,6 +219,7 @@ export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [parsedSlots, setParsedSlots] = useState<ParsedSlot[]>([]);
+  const [parseWarnings, setParseWarnings] = useState<string[]>([]);
   const [submitError, setSubmitError] = useState('');
   const [recordingSecondsLeft, setRecordingSecondsLeft] = useState(60);
 
@@ -456,8 +468,9 @@ export default function App() {
           setTranscript(combined);
 
           const today = new Date().toISOString().split('T')[0];
-          const slots = await parseAvailabilityWithClaude(combined, today, parsedSlots);
-          setParsedSlots(slots);
+          const result = await parseAvailabilityWithClaude(combined, today, parsedSlots);
+          setParsedSlots(result.slots);
+          setParseWarnings(result.warnings);
           setIsParsing(false);
 
         } catch (e: any) {
@@ -496,8 +509,9 @@ export default function App() {
       setIsParsing(true);
       setSubmitError('');
       const today = new Date().toISOString().split('T')[0];
-      const slots = await parseAvailabilityWithClaude(input, today);
-      setParsedSlots(slots);
+      const result = await parseAvailabilityWithClaude(input, today);
+      setParsedSlots(result.slots);
+      setParseWarnings(result.warnings);
       setSubmitStep('review');
       setIsParsing(false);
       return;
@@ -560,8 +574,9 @@ export default function App() {
     if (!input.trim()) return;
     setIsEditParsing(true);
     const today = new Date().toISOString().split('T')[0];
-    const updated = await parseAvailabilityWithClaude(input, today, parsedSlots);
-    setParsedSlots(updated);
+    const result = await parseAvailabilityWithClaude(input, today, parsedSlots);
+    setParsedSlots(result.slots);
+    setParseWarnings(result.warnings);
     setSubmitStep('review');
     setEditTranscript('');
     setEditTextInput('');
@@ -610,7 +625,24 @@ export default function App() {
       slots: parsedSlots,
       submittedAt: new Date().toISOString()
     };
-    const updatedParticipants = [...(activeMeeting.participants || []), participant];
+    const existingParticipants = activeMeeting.participants || [];
+    // Check if this person already submitted (by name, case-insensitive)
+    const existingIndex = existingParticipants.findIndex(
+      p => p.name.toLowerCase() === participantName.trim().toLowerCase()
+    );
+    let updatedParticipants: Participant[];
+    if (existingIndex >= 0) {
+      // Replace existing entry
+      updatedParticipants = [...existingParticipants];
+      updatedParticipants[existingIndex] = participant;
+    } else {
+      // Check participant limit
+      if (existingParticipants.length >= activeMeeting.expectedCount) {
+        setSubmitError(`This group is full (${activeMeeting.expectedCount} participants). Contact the organizer.`);
+        return;
+      }
+      updatedParticipants = [...existingParticipants, participant];
+    }
     await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
     setSubmitStep('done');
     setParticipantName('');
@@ -634,6 +666,37 @@ export default function App() {
     }
   };
 
+  const handleUpdateTitle = async () => {
+    if (!activeMeeting || !editTitleValue.trim()) return;
+    await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { title: editTitleValue.trim() });
+    setEditingTitle(false);
+  };
+
+  const handleRemoveParticipant = async (participantId: string) => {
+    if (!activeMeeting) return;
+    const participant = activeMeeting.participants.find(p => p.id === participantId);
+    if (!participant) return;
+    const updatedParticipants = activeMeeting.participants.filter(p => p.id !== participantId);
+    const archived = [...(activeMeeting.archivedParticipants || []), participant];
+    await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), {
+      participants: updatedParticipants,
+      archivedParticipants: archived,
+    });
+  };
+
+  const handleRestoreParticipant = async (participantId: string) => {
+    if (!activeMeeting) return;
+    const archived = activeMeeting.archivedParticipants || [];
+    const participant = archived.find(p => p.id === participantId);
+    if (!participant) return;
+    const updatedArchived = archived.filter(p => p.id !== participantId);
+    const updatedParticipants = [...activeMeeting.participants, participant];
+    await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), {
+      participants: updatedParticipants,
+      archivedParticipants: updatedArchived,
+    });
+  };
+
   const resetSubmit = () => {
     stopAllTimers();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
@@ -649,6 +712,7 @@ export default function App() {
     setTranscript('');
     setTextInput('');
     setParsedSlots([]);
+    setParseWarnings([]);
     setEditTranscript('');
     setEditTextInput('');
     setEditingSlot(null);
@@ -974,6 +1038,19 @@ export default function App() {
                 {submitStep === 'review' && (
                   <motion.div key="review" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-6">
 
+                    {/* Day/date warnings */}
+                    {parseWarnings.length > 0 && (
+                      <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-2xl p-4 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <AlertCircle className="w-4 h-4 text-yellow-400 shrink-0" />
+                          <p className="text-xs font-bold text-yellow-400 uppercase tracking-widest">Heads Up</p>
+                        </div>
+                        {parseWarnings.map((w, i) => (
+                          <p key={i} className="text-yellow-300/80 text-sm">{w}</p>
+                        ))}
+                      </div>
+                    )}
+
                     {/* Available dates */}
                     {availableSlots.length > 0 && (
                       <div className="space-y-3">
@@ -1179,7 +1256,27 @@ export default function App() {
                       <button onClick={() => { setView('home'); setActiveMeeting(null); }} className="p-1 hover:bg-white/10 rounded-lg transition-all"><ChevronRight className="w-4 h-4 rotate-180 text-white/40" /></button>
                       <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Meeting Group</p>
                     </div>
-                    <h2 className="text-2xl font-bold">{activeMeeting.title}</h2>
+                    {editingTitle ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          className="text-2xl font-bold bg-white/10 border border-orange-500 rounded-xl px-3 py-1 text-white outline-none"
+                          value={editTitleValue}
+                          onChange={e => setEditTitleValue(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleUpdateTitle(); if (e.key === 'Escape') setEditingTitle(false); }}
+                          autoFocus
+                        />
+                        <button onClick={handleUpdateTitle} className="p-1.5 bg-orange-500 rounded-lg hover:bg-orange-600 transition-all"><Check className="w-4 h-4 text-white" /></button>
+                        <button onClick={() => setEditingTitle(false)} className="p-1.5 bg-white/10 rounded-lg hover:bg-white/20 transition-all"><X className="w-4 h-4 text-white/60" /></button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-2xl font-bold">{activeMeeting.title}</h2>
+                        <button onClick={() => { setEditTitleValue(activeMeeting.title); setEditingTitle(true); }} className="p-1.5 hover:bg-white/10 rounded-lg transition-all" title="Edit title">
+                          <Edit2 className="w-4 h-4 text-white/30 hover:text-white/60" />
+                        </button>
+                      </div>
+                    )}
                     <p className="text-white/40 text-sm">Created by {activeMeeting.creatorName} · Due {formatDate(activeMeeting.deadline)}</p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -1210,12 +1307,40 @@ export default function App() {
                 </div>
 
                 {activeMeeting.participants?.length > 0 && (
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {activeMeeting.participants.map(p => (
-                      <span key={p.id} className="inline-flex items-center gap-1.5 bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs font-bold">
-                        <CheckCircle2 className="w-3 h-3" />{p.name}
-                      </span>
-                    ))}
+                  <div className="mt-4">
+                    <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Submitted</p>
+                    <div className="flex flex-wrap gap-2">
+                      {activeMeeting.participants.map(p => (
+                        <span key={p.id} className="inline-flex items-center gap-1.5 bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs font-bold group">
+                          <CheckCircle2 className="w-3 h-3" />{p.name}
+                          <button
+                            onClick={() => { if (window.confirm(`Remove ${p.name}? Their schedule will be archived and can be restored.`)) handleRemoveParticipant(p.id); }}
+                            className="ml-1 p-0.5 rounded-full hover:bg-red-500/30 transition-all opacity-0 group-hover:opacity-100"
+                            title={`Remove ${p.name}`}
+                          >
+                            <X className="w-3 h-3 text-red-400" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(activeMeeting.archivedParticipants?.length || 0) > 0 && (
+                  <div className="mt-3">
+                    <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Removed (tap to restore)</p>
+                    <div className="flex flex-wrap gap-2">
+                      {activeMeeting.archivedParticipants!.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => handleRestoreParticipant(p.id)}
+                          className="inline-flex items-center gap-1.5 bg-white/5 text-white/30 px-3 py-1 rounded-full text-xs font-bold hover:bg-white/10 hover:text-white/60 transition-all"
+                          title={`Restore ${p.name}'s schedule`}
+                        >
+                          <PlusCircle className="w-3 h-3" />{p.name}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
