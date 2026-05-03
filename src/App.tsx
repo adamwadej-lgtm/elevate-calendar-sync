@@ -1126,6 +1126,7 @@ export default function App() {
                                 onMouseUp={handleLongPressEnd}
                                 onMouseLeave={handleLongPressEnd}
                                 onTouchStart={() => handleLongPressStart(originalIndex, slot)}
+                                onTouchMove={handleLongPressEnd}
                                 onTouchEnd={handleLongPressEnd}
                                 onContextMenu={(e) => handleRightClick(e, originalIndex, slot)}
                                 className="flex items-center justify-between bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-3 cursor-pointer group select-none"

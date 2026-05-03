@@ -44,12 +44,17 @@ Return ONLY a JSON object with two fields:
 2. "warnings": an array of strings for any issues found (can be empty)
 
 Rules:
-- Expand recurring patterns ("every Monday in June" = list each Monday in June ${referenceDate.split('-')[0]})
+- CRITICAL DISTINCTION between recurring patterns and specific dates:
+  * "every Saturday in May" or "all Saturdays in June" = ONLY the dates that are actually Saturdays in that month. NOT every day in the month.
+  * "June 4th, 5th, and 6th" = ONLY those three specific dates. NOT every day in June.
+  * "every Monday and Wednesday in July" = ONLY the Mondays and Wednesdays in July.
+  * "the whole month of June" or "every day in June" = every day in June.
+- Only expand to multiple dates when the user explicitly says "every [day]" or "all [days]" in a month. Listing specific dates like "4th, 5th, and 6th" means ONLY those dates.
 - Handle exclusions ("except June 8th" = mark June 8th as unavailable: true)
 - Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
-- CRITICAL DAY VALIDATION: When the user says a day name AND a date (like "Monday June 8th"), you MUST verify the day-of-week for that date in the year ${referenceDate.split('-')[0]}. If they don't match, add a warning stating the actual day. Always use the DATE number they said, not the day name.
+- CRITICAL DAY VALIDATION: When the user says a day name AND a date (like "Monday June 8th"), verify the day-of-week for that date in ${referenceDate.split('-')[0]}. If they don't match, add a warning. Always use the DATE number they said.
 - If the user only says a day name without a specific date (like "every Monday"), use the correct dates that ARE that day in ${referenceDate.split('-')[0]}.
-- CRITICAL: Do NOT include dates that have already passed. Today is ${referenceDate}. If a user says "every Saturday in May" and some Saturdays have already passed, only include future Saturdays (dates on or after ${referenceDate}).
+- Do NOT include dates before ${referenceDate}. Only include today or future dates.
 - If merging with existing: apply corrections, keep everything else unchanged
 - "remove June 4th" = remove that date from results entirely
 - Return ONLY the JSON object, no explanation, no markdown backticks.`
