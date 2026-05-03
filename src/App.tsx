@@ -208,6 +208,8 @@ export default function App() {
   const [copiedId, setCopiedId] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const [editTitleValue, setEditTitleValue] = useState('');
+  const [viewingParticipant, setViewingParticipant] = useState<Participant | null>(null);
+  const [expandedParticipantId, setExpandedParticipantId] = useState<string | null>(null);
 
   // Create form
   const [createForm, setCreateForm] = useState({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4, requireCode: false });
@@ -1343,17 +1345,66 @@ export default function App() {
                     <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">Submitted</p>
                     <div className="flex flex-wrap gap-2">
                       {activeMeeting.participants.map(p => (
-                        <span key={p.id} className="inline-flex items-center gap-1.5 bg-green-500/20 text-green-400 px-3 py-1 rounded-full text-xs font-bold group">
-                          <CheckCircle2 className="w-3 h-3" />{p.name}
+                        <div key={p.id} className="relative">
                           <button
-                            onClick={() => { if (window.confirm(`Remove ${p.name}? Their schedule will be archived and can be restored.`)) handleRemoveParticipant(p.id); }}
-                            className="ml-1 p-0.5 rounded-full hover:bg-red-500/30 transition-all opacity-0 group-hover:opacity-100"
-                            title={`Remove ${p.name}`}
+                            onClick={() => setExpandedParticipantId(expandedParticipantId === p.id ? null : p.id)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-all ${expandedParticipantId === p.id ? 'bg-orange-500/30 text-orange-300 ring-1 ring-orange-500/40' : 'bg-green-500/20 text-green-400'}`}
                           >
-                            <X className="w-3 h-3 text-red-400" />
+                            <CheckCircle2 className="w-3 h-3" />{p.name}
                           </button>
-                        </span>
+                          {expandedParticipantId === p.id && (
+                            <div className="absolute top-full left-0 mt-1 bg-gray-900 border border-white/20 rounded-xl shadow-xl z-20 overflow-hidden min-w-[160px]">
+                              <button
+                                onClick={() => { setViewingParticipant(p); setExpandedParticipantId(null); }}
+                                className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-white hover:bg-white/10 transition-all"
+                              >
+                                <CalendarIcon className="w-4 h-4 text-orange-400" />View Schedule
+                              </button>
+                              <button
+                                onClick={() => { if (window.confirm(`Remove ${p.name}? Their schedule will be archived and can be restored.`)) { handleRemoveParticipant(p.id); setExpandedParticipantId(null); } }}
+                                className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-400 hover:bg-red-500/10 transition-all border-t border-white/10"
+                              >
+                                <Trash2 className="w-4 h-4" />Archive
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* View participant schedule modal */}
+                {viewingParticipant && (
+                  <div className="mt-4 bg-white/5 border border-orange-500/30 rounded-2xl p-5">
+                    <div className="flex justify-between items-center mb-4">
+                      <div>
+                        <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest">{viewingParticipant.name}'s Schedule</p>
+                        <p className="text-[10px] text-white/20">Submitted {new Date(viewingParticipant.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
+                      </div>
+                      <button onClick={() => setViewingParticipant(null)} className="p-1.5 hover:bg-white/10 rounded-lg transition-all"><X className="w-4 h-4 text-white/40" /></button>
+                    </div>
+                    <div className="space-y-2">
+                      {viewingParticipant.slots.filter(s => !s.unavailable).length > 0 ? (
+                        viewingParticipant.slots.filter(s => !s.unavailable).map((slot, i) => (
+                          <div key={i} className="flex items-center justify-between bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-2.5">
+                            <p className="font-bold text-white text-sm">{formatDateFull(slot.date)}</p>
+                            <p className="text-green-400 font-bold text-sm">{formatTime(slot.start)} – {formatTime(slot.end)}</p>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-white/30 text-sm text-center py-4">No available slots submitted.</p>
+                      )}
+                      {viewingParticipant.slots.filter(s => s.unavailable).length > 0 && (
+                        <div className="mt-2">
+                          <p className="text-[10px] font-bold text-red-400/60 uppercase tracking-widest mb-1">Not Available</p>
+                          {viewingParticipant.slots.filter(s => s.unavailable).map((slot, i) => (
+                            <div key={i} className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-2 mb-1">
+                              <p className="font-bold text-white/40 text-sm line-through">{formatDateFull(slot.date)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

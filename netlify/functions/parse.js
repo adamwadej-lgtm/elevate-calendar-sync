@@ -49,6 +49,7 @@ Rules:
 - Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
 - CRITICAL DAY VALIDATION: When the user says a day name AND a date (like "Monday June 8th"), you MUST verify the day-of-week for that date in the year ${referenceDate.split('-')[0]}. If they don't match, add a warning stating the actual day. Always use the DATE number they said, not the day name.
 - If the user only says a day name without a specific date (like "every Monday"), use the correct dates that ARE that day in ${referenceDate.split('-')[0]}.
+- CRITICAL: Do NOT include dates that have already passed. Today is ${referenceDate}. If a user says "every Saturday in May" and some Saturdays have already passed, only include future Saturdays (dates on or after ${referenceDate}).
 - If merging with existing: apply corrections, keep everything else unchanged
 - "remove June 4th" = remove that date from results entirely
 - Return ONLY the JSON object, no explanation, no markdown backticks.`
