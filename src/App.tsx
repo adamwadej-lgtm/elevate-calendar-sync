@@ -46,6 +46,7 @@ const db = getFirestore(firebaseApp);
 // Audio is sent to a Netlify serverless function that proxies to Deepgram server-side,
 // bypassing CORS. The DEEPGRAM_API_KEY lives in Netlify environment variables.
 const TRANSCRIBE_ENDPOINT = '/.netlify/functions/transcribe';
+const PARSE_ENDPOINT = '/.netlify/functions/parse';
 
 // --- Types ---
 type ParsedSlot = {
@@ -109,44 +110,27 @@ const formatDateFull = (dateStr: string) => {
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
 };
 
-// --- Claude AI Parser ---
+// --- Claude AI Parser (via Netlify proxy) ---
 const parseAvailabilityWithClaude = async (
   transcript: string,
   referenceDate: string,
   existingSlots: ParsedSlot[] = []
 ): Promise<ParsedSlot[]> => {
-  const existingContext = existingSlots.length > 0
-    ? `\n\nExisting schedule to merge/update:\n${JSON.stringify(existingSlots)}`
-    : '';
-
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const response = await fetch(PARSE_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
-      messages: [{
-        role: 'user',
-        content: `Today's date is ${referenceDate}. Parse this availability statement into structured JSON.${existingContext}
-
-Statement: "${transcript}"
-
-Return ONLY a JSON array. Each item must have:
-- "date": YYYY-MM-DD
-- "start": HH:mm (24hr) — use "00:00" if unavailable all day
-- "end": HH:mm (24hr) — use "00:00" if unavailable all day  
-- "unavailable": true ONLY if the person explicitly says they are NOT available that date
-
-Rules:
-- Expand recurring patterns ("every Monday in June" = list each Monday)
-- Handle exclusions ("except June 8th" = mark June 8th as unavailable: true)
-- Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
-- If merging with existing: apply corrections, keep everything else unchanged
-- "remove June 4th" = remove that date from results entirely
-- Return ONLY the JSON array, no explanation, no markdown backticks.`
-      }]
+      transcript,
+      referenceDate,
+      existingSlots,
     })
   });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '');
+    console.error('Parse proxy error:', response.status, errorBody);
+    throw new Error(`Schedule parsing failed (${response.status})`);
+  }
 
   const data = await response.json();
   const text = data.content?.[0]?.text || '[]';
