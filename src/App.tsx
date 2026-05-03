@@ -230,6 +230,7 @@ export default function App() {
   const [editTitleValue, setEditTitleValue] = useState('');
   const [viewingParticipant, setViewingParticipant] = useState<Participant | null>(null);
   const [expandedParticipantId, setExpandedParticipantId] = useState<string | null>(null);
+  const [editingParticipantSlots, setEditingParticipantSlots] = useState<ParsedSlot[] | null>(null);
 
   // Create form
   const [createForm, setCreateForm] = useState({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4, requireCode: false });
@@ -674,6 +675,20 @@ export default function App() {
       );
       let updatedParticipants: Participant[];
       if (existingIndex >= 0) {
+        // Merge slots: newer slots take priority for same dates
+        const existingSlots = existingParticipants[existingIndex].slots;
+        const mergedSlots = [...existingSlots];
+        for (const newSlot of parsedSlots) {
+          const conflictIndex = mergedSlots.findIndex(s => s.date === newSlot.date);
+          if (conflictIndex >= 0) {
+            mergedSlots[conflictIndex] = newSlot; // newer takes priority
+          } else {
+            mergedSlots.push(newSlot);
+          }
+        }
+        mergedSlots.sort((a, b) => a.date.localeCompare(b.date));
+        participant.slots = mergedSlots;
+        participant.id = existingParticipants[existingIndex].id; // keep same ID
         updatedParticipants = [...existingParticipants];
         updatedParticipants[existingIndex] = participant;
       } else {
@@ -681,6 +696,7 @@ export default function App() {
       }
       await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
       addMyGroup(activeMeeting.id);
+      localStorage.setItem('elevate_user_name', participantName.trim());
       setSubmitStep('done');
       setParticipantName('');
       setTranscript('');
@@ -737,6 +753,18 @@ export default function App() {
       participants: updatedParticipants,
       archivedParticipants: updatedArchived,
     });
+  };
+
+  const handleSaveParticipantEdit = async () => {
+    if (!activeMeeting || !viewingParticipant || !editingParticipantSlots) return;
+    const updatedParticipants = activeMeeting.participants.map(p =>
+      p.id === viewingParticipant.id
+        ? { ...p, slots: editingParticipantSlots, submittedAt: new Date().toISOString() }
+        : p
+    );
+    await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
+    setViewingParticipant({ ...viewingParticipant, slots: editingParticipantSlots, submittedAt: new Date().toISOString() });
+    setEditingParticipantSlots(null);
   };
 
   const resetSubmit = () => {
@@ -1341,8 +1369,29 @@ export default function App() {
                     <button onClick={() => copyJoinLink(activeMeeting.id)} className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
                       {copiedId === activeMeeting.id ? <><Check className="w-4 h-4 text-green-400" />Copied!</> : <><Copy className="w-4 h-4" />Copy Join Link</>}
                     </button>
-                    <button onClick={() => { setView('submit'); resetSubmit(); }} className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
-                      <Mic className="w-4 h-4" />Submit Mine
+                    <button onClick={() => {
+                      // Check if user already submitted by looking for stored name
+                      const storedName = localStorage.getItem('elevate_user_name') || '';
+                      const existingEntry = storedName ? activeMeeting.participants?.find(
+                        p => p.name.toLowerCase() === storedName.toLowerCase()
+                      ) : null;
+                      resetSubmit();
+                      if (existingEntry) {
+                        setParticipantName(existingEntry.name);
+                        setParsedSlots(existingEntry.slots);
+                        finalTranscriptRef.current = existingEntry.transcript || 'existing';
+                      }
+                      setView('submit');
+                    }} className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
+                      {(() => {
+                        const storedName = localStorage.getItem('elevate_user_name') || '';
+                        const alreadySubmitted = storedName && activeMeeting.participants?.some(
+                          p => p.name.toLowerCase() === storedName.toLowerCase()
+                        );
+                        return alreadySubmitted
+                          ? <><PlusCircle className="w-4 h-4" />Add More</>
+                          : <><Mic className="w-4 h-4" />Submit Mine</>;
+                      })()}
                     </button>
                     <button
                       onClick={() => { if (window.confirm(`Delete "${activeMeeting.title}"? This cannot be undone.`)) handleDeleteMeeting(activeMeeting.id); }}
@@ -1422,30 +1471,83 @@ export default function App() {
                         <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest">{viewingParticipant.name}'s Schedule</p>
                         <p className="text-[10px] text-white/20">Submitted {new Date(viewingParticipant.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</p>
                       </div>
-                      <button onClick={() => setViewingParticipant(null)} className="p-1.5 hover:bg-white/10 rounded-lg transition-all"><X className="w-4 h-4 text-white/40" /></button>
+                      <div className="flex items-center gap-2">
+                        {!editingParticipantSlots && (
+                          <button
+                            onClick={() => setEditingParticipantSlots([...viewingParticipant.slots])}
+                            className="flex items-center gap-1.5 bg-orange-500/20 text-orange-400 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-orange-500/30 transition-all"
+                          >
+                            <Edit2 className="w-3 h-3" />Edit Schedule
+                          </button>
+                        )}
+                        <button onClick={() => { setViewingParticipant(null); setEditingParticipantSlots(null); }} className="p-1.5 hover:bg-white/10 rounded-lg transition-all"><X className="w-4 h-4 text-white/40" /></button>
+                      </div>
                     </div>
-                    <div className="space-y-2">
-                      {viewingParticipant.slots.filter(s => !s.unavailable).length > 0 ? (
-                        viewingParticipant.slots.filter(s => !s.unavailable).map((slot, i) => (
-                          <div key={i} className="flex items-center justify-between bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-2.5">
-                            <p className="font-bold text-white text-sm">{formatDateFull(slot.date)}</p>
-                            <p className="text-green-400 font-bold text-sm">{formatTime(slot.start)} – {formatTime(slot.end)}</p>
-                          </div>
-                        ))
-                      ) : (
-                        <p className="text-white/30 text-sm text-center py-4">No available slots submitted.</p>
-                      )}
-                      {viewingParticipant.slots.filter(s => s.unavailable).length > 0 && (
-                        <div className="mt-2">
-                          <p className="text-[10px] font-bold text-red-400/60 uppercase tracking-widest mb-1">Not Available</p>
-                          {viewingParticipant.slots.filter(s => s.unavailable).map((slot, i) => (
-                            <div key={i} className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-2 mb-1">
-                              <p className="font-bold text-white/40 text-sm line-through">{formatDateFull(slot.date)}</p>
+
+                    {editingParticipantSlots ? (
+                      /* Inline edit mode */
+                      <div className="space-y-3">
+                        {editingParticipantSlots.filter(s => !s.unavailable).map((slot, i) => {
+                          const slotIndex = editingParticipantSlots.indexOf(slot);
+                          return (
+                            <div key={i} className="bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-3">
+                              <p className="font-bold text-white text-sm mb-2">{formatDateFull(slot.date)}</p>
+                              <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                  <label className="text-[10px] text-white/30 uppercase">Start</label>
+                                  <input type="time" className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-white text-sm outline-none focus:border-orange-500" value={slot.start} onChange={e => {
+                                    const updated = [...editingParticipantSlots];
+                                    updated[slotIndex] = { ...updated[slotIndex], start: e.target.value };
+                                    setEditingParticipantSlots(updated);
+                                  }} />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-[10px] text-white/30 uppercase">End</label>
+                                  <input type="time" className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-white text-sm outline-none focus:border-orange-500" value={slot.end} onChange={e => {
+                                    const updated = [...editingParticipantSlots];
+                                    updated[slotIndex] = { ...updated[slotIndex], end: e.target.value };
+                                    setEditingParticipantSlots(updated);
+                                  }} />
+                                </div>
+                              </div>
+                              <button onClick={() => setEditingParticipantSlots(editingParticipantSlots.filter((_, idx) => idx !== slotIndex))} className="mt-2 text-red-400 text-xs hover:text-red-300 transition-all flex items-center gap-1">
+                                <Trash2 className="w-3 h-3" />Remove this date
+                              </button>
                             </div>
-                          ))}
+                          );
+                        })}
+                        <div className="grid grid-cols-2 gap-3 pt-2">
+                          <button onClick={() => setEditingParticipantSlots(null)} className="py-2.5 rounded-xl font-bold text-white/40 hover:bg-white/10 transition-all border border-white/10 text-sm">Cancel</button>
+                          <button onClick={handleSaveParticipantEdit} className="bg-orange-500 text-white py-2.5 rounded-xl font-bold hover:bg-orange-600 transition-all flex items-center justify-center gap-2 text-sm">
+                            <Check className="w-4 h-4" />Save Changes
+                          </button>
                         </div>
-                      )}
-                    </div>
+                      </div>
+                    ) : (
+                      /* View mode */
+                      <div className="space-y-2">
+                        {viewingParticipant.slots.filter(s => !s.unavailable).length > 0 ? (
+                          viewingParticipant.slots.filter(s => !s.unavailable).map((slot, i) => (
+                            <div key={i} className="flex items-center justify-between bg-green-500/10 border border-green-500/20 rounded-xl px-4 py-2.5">
+                              <p className="font-bold text-white text-sm">{formatDateFull(slot.date)}</p>
+                              <p className="text-green-400 font-bold text-sm">{formatTime(slot.start)} – {formatTime(slot.end)}</p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-white/30 text-sm text-center py-4">No available slots submitted.</p>
+                        )}
+                        {viewingParticipant.slots.filter(s => s.unavailable).length > 0 && (
+                          <div className="mt-2">
+                            <p className="text-[10px] font-bold text-red-400/60 uppercase tracking-widest mb-1">Not Available</p>
+                            {viewingParticipant.slots.filter(s => s.unavailable).map((slot, i) => (
+                              <div key={i} className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-2 mb-1">
+                                <p className="font-bold text-white/40 text-sm line-through">{formatDateFull(slot.date)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
