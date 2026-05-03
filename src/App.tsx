@@ -220,6 +220,7 @@ export default function App() {
   const [isParsing, setIsParsing] = useState(false);
   const [parsedSlots, setParsedSlots] = useState<ParsedSlot[]>([]);
   const [submitError, setSubmitError] = useState('');
+  const [recordingSecondsLeft, setRecordingSecondsLeft] = useState(60);
 
   // Edit flow
   const [editingSlot, setEditingSlot] = useState<EditingSlot | null>(null);
@@ -231,6 +232,10 @@ export default function App() {
 
   const recognitionRef = useRef<any>(null);
   const editRecognitionRef = useRef<any>(null);
+  const finalTranscriptRef = useRef<string>('');
+  const silenceTimerRef = useRef<any>(null);
+  const maxTimerRef = useRef<any>(null);
+  const countdownRef = useRef<any>(null);
 
   // Check mic availability
   useEffect(() => {
@@ -287,38 +292,100 @@ export default function App() {
   };
 
   // --- Main recording ---
+  const stopAllTimers = () => {
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+    if (maxTimerRef.current) { clearTimeout(maxTimerRef.current); maxTimerRef.current = null; }
+    if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
+  };
+
+  const stopRecording = useCallback(() => {
+    stopAllTimers();
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+      recognitionRef.current = null;
+    }
+    setIsRecording(false);
+    setRecordingSecondsLeft(60);
+  }, []);
+
   const startRecording = () => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) { setSubmitError('Voice not supported. Please use Chrome.'); return; }
+
+    // Reset
+    finalTranscriptRef.current = '';
+    setTranscript('');
+    setSubmitError('');
+    setRecordingSecondsLeft(60);
+
     const recognition = new SR();
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
+    recognition.maxAlternatives = 1;
+
     recognition.onresult = (event: any) => {
-      let final = ''; let interim = '';
+      // Reset silence timer every time speech is detected
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = setTimeout(() => {
+        stopRecording();
+      }, 5000); // 5 seconds of silence before auto-stop
+
+      // Build transcript cleanly: only use final results + current interim
+      let finalText = '';
+      let interimText = '';
       for (let i = 0; i < event.results.length; i++) {
-        if (event.results[i].isFinal) final += event.results[i][0].transcript + ' ';
-        else interim += event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalText += event.results[i][0].transcript + ' ';
+        } else {
+          interimText = event.results[i][0].transcript;
+        }
       }
-      setTranscript(final + interim);
+      finalTranscriptRef.current = finalText;
+      setTranscript(finalText + interimText);
     };
-    recognition.onerror = () => { setIsRecording(false); setSubmitError('Recording error. Try again.'); };
-    recognition.onend = () => setIsRecording(false);
+
+    recognition.onerror = (event: any) => {
+      // Ignore no-speech errors — just keep going
+      if (event.error === 'no-speech') return;
+      stopRecording();
+      if (event.error !== 'aborted') setSubmitError('Recording error. Try again.');
+    };
+
+    recognition.onend = () => {
+      // If still within time limit and not manually stopped, restart recognition
+      // This handles mobile browsers that auto-end after silence
+      if (recognitionRef.current && maxTimerRef.current) {
+        try { recognition.start(); } catch {}
+      }
+    };
+
     recognitionRef.current = recognition;
     recognition.start();
     setIsRecording(true);
-    setTranscript('');
-    setSubmitError('');
-  };
 
-  const stopRecording = () => {
-    if (recognitionRef.current) recognitionRef.current.stop();
-    setIsRecording(false);
+    // 60 second countdown
+    let secondsLeft = 60;
+    countdownRef.current = setInterval(() => {
+      secondsLeft -= 1;
+      setRecordingSecondsLeft(secondsLeft);
+      if (secondsLeft <= 0) stopRecording();
+    }, 1000);
+
+    // Hard stop at 60 seconds
+    maxTimerRef.current = setTimeout(() => {
+      stopRecording();
+    }, 60000);
+
+    // Initial silence timer
+    silenceTimerRef.current = setTimeout(() => {
+      stopRecording();
+    }, 5000);
   };
 
   const handleProcessInput = async () => {
-    const input = hasMic ? transcript : textInput;
-    if (!input.trim() || !participantName.trim()) {
+    const input = hasMic ? (finalTranscriptRef.current || transcript).trim() : textInput.trim();
+    if (!input || !participantName.trim()) {
       setSubmitError('Please enter your name and provide your availability.');
       return;
     }
@@ -432,6 +499,11 @@ export default function App() {
   };
 
   const resetSubmit = () => {
+    stopAllTimers();
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} recognitionRef.current = null; }
+    finalTranscriptRef.current = '';
+    setIsRecording(false);
+    setRecordingSecondsLeft(60);
     setSubmitStep('input');
     setTranscript('');
     setTextInput('');
@@ -627,21 +699,53 @@ export default function App() {
                     {hasMic ? (
                       <>
                         <div className="flex flex-col items-center gap-4">
-                          <motion.button whileTap={{ scale: 0.95 }} onClick={isRecording ? stopRecording : startRecording} className={`w-28 h-28 rounded-full flex flex-col items-center justify-center text-white shadow-lg transition-all gap-2 ${isRecording ? 'bg-red-500' : 'bg-orange-500 hover:bg-orange-600'}`}>
-                            {isRecording ? <><MicOff className="w-10 h-10" /><span className="text-xs font-bold">Stop</span></> : <><Mic className="w-10 h-10" /><span className="text-xs font-bold">Record</span></>}
-                          </motion.button>
-                          {isRecording && (
+                          {/* Countdown ring around record button */}
+                          <div className="relative w-32 h-32 flex items-center justify-center">
+                            {isRecording && (
+                              <svg className="absolute inset-0 w-32 h-32 -rotate-90" viewBox="0 0 128 128">
+                                <circle cx="64" cy="64" r="58" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="4" />
+                                <circle
+                                  cx="64" cy="64" r="58" fill="none"
+                                  stroke={recordingSecondsLeft > 15 ? '#f97316' : '#ef4444'}
+                                  strokeWidth="4"
+                                  strokeLinecap="round"
+                                  strokeDasharray={`${2 * Math.PI * 58}`}
+                                  strokeDashoffset={`${2 * Math.PI * 58 * (1 - recordingSecondsLeft / 60)}`}
+                                  style={{ transition: 'stroke-dashoffset 1s linear, stroke 0.3s' }}
+                                />
+                              </svg>
+                            )}
+                            <motion.button
+                              whileTap={{ scale: 0.95 }}
+                              onClick={isRecording ? stopRecording : startRecording}
+                              className={`w-24 h-24 rounded-full flex flex-col items-center justify-center text-white shadow-lg transition-all gap-1 ${isRecording ? 'bg-red-500' : 'bg-orange-500 hover:bg-orange-600'}`}
+                            >
+                              {isRecording
+                                ? <><MicOff className="w-9 h-9" /><span className="text-[11px] font-bold">{recordingSecondsLeft}s</span></>
+                                : <><Mic className="w-9 h-9" /><span className="text-[11px] font-bold">Record</span></>
+                              }
+                            </motion.button>
+                          </div>
+
+                          {isRecording ? (
                             <div className="flex items-center gap-2 text-red-400 text-sm font-bold animate-pulse">
                               <div className="w-2 h-2 rounded-full bg-red-400"></div>
-                              Recording...
+                              Recording — stops after 5s of silence or 60s max
                             </div>
-                          )}
+                          ) : transcript ? (
+                            <button onClick={() => { finalTranscriptRef.current = ''; setTranscript(''); }} className="text-white/30 text-xs hover:text-white/60 transition-all underline">
+                              Clear &amp; Start Over
+                            </button>
+                          ) : null}
                         </div>
 
                         {transcript && (
                           <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
-                            <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest mb-2">What we heard</p>
-                            <p className="text-white/80 text-sm leading-relaxed">{transcript}</p>
+                            <div className="flex justify-between items-center mb-2">
+                              <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest">What we heard</p>
+                              <span className="text-[10px] text-white/20">(tap Record again to add more)</span>
+                            </div>
+                            <p className="text-white/80 text-sm leading-relaxed">{finalTranscriptRef.current || transcript}</p>
                           </div>
                         )}
                       </>
@@ -668,7 +772,7 @@ export default function App() {
                     )}
 
                     <button
-                      disabled={(!transcript && !textInput) || !participantName || isParsing}
+                      disabled={(!finalTranscriptRef.current && !transcript && !textInput) || !participantName || isParsing || isRecording}
                       onClick={handleProcessInput}
                       className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
                     >
