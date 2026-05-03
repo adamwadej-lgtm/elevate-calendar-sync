@@ -413,18 +413,29 @@ export default function App() {
 
         const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
         setIsParsing(true);
-        setTranscript('Transcribing...');
 
         try {
-          // Send to Deepgram via Netlify proxy (bypasses CORS)
+          // Convert audio to base64 to avoid binary corruption through Netlify gateway
+          const arrayBuffer = await audioBlob.arrayBuffer();
+          const uint8 = new Uint8Array(arrayBuffer);
+          let binary = '';
+          for (let i = 0; i < uint8.length; i++) {
+            binary += String.fromCharCode(uint8[i]);
+          }
+          const base64Audio = btoa(binary);
+
+          // Send base64 to Netlify proxy for Deepgram transcription
           const dgResponse = await fetch(
             TRANSCRIBE_ENDPOINT,
             {
               method: 'POST',
               headers: {
-                'Content-Type': mediaRecorder.mimeType || 'audio/webm',
+                'Content-Type': 'application/json',
               },
-              body: audioBlob,
+              body: JSON.stringify({
+                audio: base64Audio,
+                mimeType: mediaRecorder.mimeType || 'audio/webm',
+              }),
             }
           );
 
@@ -438,20 +449,19 @@ export default function App() {
           const transcribedText = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
 
           if (!transcribedText.trim()) {
-            setTranscript('');
             setSubmitError('No speech detected. Please speak clearly and try again.');
             setIsParsing(false);
             return;
           }
 
-          // Append to existing transcript
+          // Store transcript internally (not displayed to user)
           const combined = finalTranscriptRef.current
             ? finalTranscriptRef.current + ' ' + transcribedText
             : transcribedText;
           finalTranscriptRef.current = combined;
-          setTranscript(combined);
+          setTranscript(combined); // used only to track that we have data
 
-          // Now parse with Claude
+          // Parse with Claude to extract schedule
           const today = new Date().toISOString().split('T')[0];
           const slots = await parseAvailabilityWithClaude(combined, today, parsedSlots);
           setParsedSlots(slots);
@@ -459,7 +469,6 @@ export default function App() {
 
         } catch (e) {
           console.error('Transcription error:', e);
-          setTranscript('');
           setSubmitError('Could not transcribe audio. Please check your connection and try again.');
           setIsParsing(false);
         }
@@ -521,10 +530,18 @@ export default function App() {
         stream.getTracks().forEach(t => t.stop());
         const blob = new Blob(chunks, { type: mimeType });
         try {
+          const arrayBuffer = await blob.arrayBuffer();
+          const uint8 = new Uint8Array(arrayBuffer);
+          let binary = '';
+          for (let i = 0; i < uint8.length; i++) {
+            binary += String.fromCharCode(uint8[i]);
+          }
+          const base64Audio = btoa(binary);
+
           const res = await fetch(TRANSCRIBE_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': mimeType },
-            body: blob,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ audio: base64Audio, mimeType }),
           });
           const data = await res.json();
           const text = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
@@ -868,7 +885,7 @@ export default function App() {
                                   }}
                                 />
                                 {/* Countdown SVG ring */}
-                                <svg className="absolute w-32 h-32 -rotate-90" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%) rotate(-90deg)' }} viewBox="0 0 128 128">
+                                <svg className="absolute w-32 h-32" style={{ left: '50%', top: '50%', transform: 'translate(-50%, -50%) rotate(-90deg)' }} viewBox="0 0 128 128">
                                   <circle cx="64" cy="64" r="58" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="4" />
                                   <circle
                                     cx="64" cy="64" r="58" fill="none"
@@ -920,22 +937,8 @@ export default function App() {
                                 {audioLevel > 0.05 ? 'Listening...' : 'Waiting for speech...'}
                               </div>
                             </div>
-                          ) : transcript ? (
-                            <button onClick={() => { finalTranscriptRef.current = ''; setTranscript(''); }} className="text-white/30 text-xs hover:text-white/60 transition-all underline">
-                              Clear &amp; Start Over
-                            </button>
                           ) : null}
                         </div>
-
-                        {transcript && (
-                          <div className="bg-white/5 border border-white/10 rounded-2xl p-4">
-                            <div className="flex justify-between items-center mb-2">
-                              <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest">What we heard</p>
-                              <span className="text-[10px] text-white/20">(tap Record again to add more)</span>
-                            </div>
-                            <p className="text-white/80 text-sm leading-relaxed">{finalTranscriptRef.current || transcript}</p>
-                          </div>
-                        )}
                       </>
                     ) : (
                       <div className="space-y-2">
