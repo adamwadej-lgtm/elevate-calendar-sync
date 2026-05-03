@@ -71,6 +71,7 @@ type MeetingGroup = {
   creatorEmail: string;
   deadline: string;
   expectedCount: number;
+  requireCode: boolean; // if true, users must enter the meeting ID to join; if false, link grants direct access
   participants: Participant[];
   archivedParticipants?: Participant[];
   createdAt: string;
@@ -209,7 +210,7 @@ export default function App() {
   const [editTitleValue, setEditTitleValue] = useState('');
 
   // Create form
-  const [createForm, setCreateForm] = useState({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4 });
+  const [createForm, setCreateForm] = useState({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4, requireCode: false });
 
   // Submit flow
   const [submitStep, setSubmitStep] = useState<'input' | 'review' | 'editing' | 'done'>('input');
@@ -264,7 +265,7 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('join');
-    if (code) handleJoinMeeting(code);
+    if (code) handleJoinMeeting(code, true);
   }, []);
 
   // Sync active meeting
@@ -277,20 +278,28 @@ export default function App() {
 
   const handleCreateMeeting = async () => {
     if (!createForm.title || !createForm.creatorName || !createForm.creatorEmail || !createForm.deadline) return;
-    const newMeeting = { ...createForm, participants: [], createdAt: new Date().toISOString(), notified: false };
+    const newMeeting = { ...createForm, participants: [], archivedParticipants: [], createdAt: new Date().toISOString(), notified: false };
     const docRef = await addDoc(collection(db, 'meetingGroups'), newMeeting);
     setActiveMeeting({ ...newMeeting, id: docRef.id });
     setView('results');
-    setCreateForm({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4 });
+    setCreateForm({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4, requireCode: false });
   };
 
-  const handleJoinMeeting = async (code: string) => {
+  const handleJoinMeeting = async (code: string, fromLink = false) => {
     const id = code.trim();
     const docSnap = await getDoc(doc(db, 'meetingGroups', id));
     if (docSnap.exists()) {
-      setActiveMeeting({ id: docSnap.id, ...docSnap.data() } as MeetingGroup);
-      setView('submit');
-      setJoinError('');
+      const meeting = { id: docSnap.id, ...docSnap.data() } as MeetingGroup;
+      // If requireCode is on AND this came from a link (not manual code entry), show the results page instead of submit
+      if (meeting.requireCode && fromLink) {
+        setActiveMeeting(meeting);
+        setView('results');
+        setJoinError('');
+      } else {
+        setActiveMeeting(meeting);
+        setView('submit');
+        setJoinError('');
+      }
     } else {
       setJoinError('Meeting not found. Check the link and try again.');
     }
@@ -636,11 +645,6 @@ export default function App() {
       updatedParticipants = [...existingParticipants];
       updatedParticipants[existingIndex] = participant;
     } else {
-      // Check participant limit
-      if (existingParticipants.length >= activeMeeting.expectedCount) {
-        setSubmitError(`This group is full (${activeMeeting.expectedCount} participants). Contact the organizer.`);
-        return;
-      }
       updatedParticipants = [...existingParticipants, participant];
     }
     await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
@@ -863,9 +867,21 @@ export default function App() {
                   <div className="space-y-2">
                     <label className="text-xs font-bold uppercase text-white/40 tracking-wider">Expected Participants</label>
                     <select className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 font-bold text-white outline-none focus:border-orange-500 appearance-none" value={createForm.expectedCount} onChange={e => setCreateForm({ ...createForm, expectedCount: parseInt(e.target.value) })}>
-                      {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n} people</option>)}
+                      {[2,3,4,5,6,7,8,10,12,15,20].map(n => <option key={n} value={n}>{n} people</option>)}
                     </select>
                   </div>
+                </div>
+                <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-xl px-4 py-3">
+                  <div>
+                    <p className="text-sm font-bold text-white">Require Join Code</p>
+                    <p className="text-[11px] text-white/40">When on, participants must enter the meeting ID to join. When off, anyone with the link can join directly.</p>
+                  </div>
+                  <button
+                    onClick={() => setCreateForm({ ...createForm, requireCode: !createForm.requireCode })}
+                    className={`relative w-12 h-6 rounded-full transition-all ${createForm.requireCode ? 'bg-orange-500' : 'bg-white/20'}`}
+                  >
+                    <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all shadow ${createForm.requireCode ? 'left-6' : 'left-0.5'}`} />
+                  </button>
                 </div>
                 <button disabled={!createForm.title || !createForm.creatorName || !createForm.creatorEmail || !createForm.deadline} onClick={handleCreateMeeting} className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2">
                   <Plus className="w-5 h-5" />Create & Get Shareable Link
@@ -1302,8 +1318,24 @@ export default function App() {
                     <span>{(activeMeeting.participants?.length || 0) >= activeMeeting.expectedCount ? '✅ Everyone responded!' : `Waiting on ${activeMeeting.expectedCount - (activeMeeting.participants?.length || 0)} more...`}</span>
                   </div>
                   <div className="w-full bg-white/10 rounded-full h-2">
-                    <div className="bg-orange-500 h-2 rounded-full transition-all" style={{ width: `${Math.round(((activeMeeting.participants?.length || 0) / activeMeeting.expectedCount) * 100)}%` }}></div>
+                    <div className="bg-orange-500 h-2 rounded-full transition-all" style={{ width: `${Math.min(100, Math.round(((activeMeeting.participants?.length || 0) / activeMeeting.expectedCount) * 100))}%` }}></div>
                   </div>
+                </div>
+
+                {/* Require Code toggle — creator can change anytime */}
+                <div className="mt-4 flex items-center justify-between bg-white/5 border border-white/10 rounded-xl px-4 py-3">
+                  <div>
+                    <p className="text-sm font-bold text-white">Require Join Code</p>
+                    <p className="text-[11px] text-white/40">{activeMeeting.requireCode ? 'New participants must enter the meeting ID' : 'Anyone with the link can join directly'}</p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { requireCode: !activeMeeting.requireCode });
+                    }}
+                    className={`relative w-12 h-6 rounded-full transition-all ${activeMeeting.requireCode ? 'bg-orange-500' : 'bg-white/20'}`}
+                  >
+                    <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all shadow ${activeMeeting.requireCode ? 'left-6' : 'left-0.5'}`} />
+                  </button>
                 </div>
 
                 {activeMeeting.participants?.length > 0 && (
