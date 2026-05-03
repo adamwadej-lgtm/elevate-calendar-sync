@@ -31,23 +31,24 @@ exports.handler = async (event) => {
         max_tokens: 2000,
         messages: [{
           role: 'user',
-          content: `Today's date is ${referenceDate}. Parse this availability statement into structured JSON.${existingContext}
+          content: `Today's date is ${referenceDate} (the current year is ${referenceDate.split('-')[0]}). Parse this availability statement into structured JSON.${existingContext}
 
 Statement: "${transcript}"
 
 Return ONLY a JSON object with two fields:
 1. "slots": an array where each item has:
-   - "date": YYYY-MM-DD
+   - "date": YYYY-MM-DD (always use the year ${referenceDate.split('-')[0]} unless another year is explicitly stated)
    - "start": HH:mm (24hr) — use "00:00" if unavailable all day
    - "end": HH:mm (24hr) — use "00:00" if unavailable all day  
    - "unavailable": true ONLY if the person explicitly says they are NOT available that date
 2. "warnings": an array of strings for any issues found (can be empty)
 
 Rules:
-- Expand recurring patterns ("every Monday in June" = list each Monday)
+- Expand recurring patterns ("every Monday in June" = list each Monday in June ${referenceDate.split('-')[0]})
 - Handle exclusions ("except June 8th" = mark June 8th as unavailable: true)
 - Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
-- CRITICAL: Validate day-of-week against the actual calendar date. If someone says "Monday June 8th" but June 8th is actually a Sunday, add a warning like "June 8th is actually a Sunday, not Monday. Used the date June 8th." Always use the DATE they specified, not the day name.
+- CRITICAL DAY VALIDATION: When the user says a day name AND a date (like "Monday June 8th"), you MUST verify the day-of-week for that date in the year ${referenceDate.split('-')[0]}. If they don't match, add a warning stating the actual day. Always use the DATE number they said, not the day name.
+- If the user only says a day name without a specific date (like "every Monday"), use the correct dates that ARE that day in ${referenceDate.split('-')[0]}.
 - If merging with existing: apply corrections, keep everything else unchanged
 - "remove June 4th" = remove that date from results entirely
 - Return ONLY the JSON object, no explanation, no markdown backticks.`
