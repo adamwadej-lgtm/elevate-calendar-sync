@@ -266,6 +266,14 @@ export default function App() {
   const silenceStartRef = useRef<number | null>(null);
   const [audioLevel, setAudioLevel] = useState(0); // 0-1 for mic visualizer
 
+  // Close participant dropdown when clicking outside
+  useEffect(() => {
+    if (!expandedParticipantId) return;
+    const handleClickOutside = () => setExpandedParticipantId(null);
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [expandedParticipantId]);
+
   // Check mic availability
   useEffect(() => {
     navigator.mediaDevices?.getUserMedia({ audio: true })
@@ -1371,8 +1379,8 @@ export default function App() {
                       {copiedId === activeMeeting.id ? <><Check className="w-4 h-4 text-green-400" />Copied!</> : <><Copy className="w-4 h-4" />Copy Join Link</>}
                     </button>
                     <button onClick={() => {
-                      // Check if user already submitted by looking for stored name
-                      const storedName = localStorage.getItem('elevate_user_name') || '';
+                      // Check if user already submitted
+                      const storedName = localStorage.getItem('elevate_user_name') || participantName || '';
                       const existingEntry = storedName ? activeMeeting.participants?.find(
                         p => p.name.toLowerCase() === storedName.toLowerCase()
                       ) : null;
@@ -1381,11 +1389,13 @@ export default function App() {
                         setParticipantName(existingEntry.name);
                         setParsedSlots(existingEntry.slots);
                         finalTranscriptRef.current = existingEntry.transcript || 'existing';
+                      } else if (storedName) {
+                        setParticipantName(storedName);
                       }
                       setView('submit');
                     }} className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
                       {(() => {
-                        const storedName = localStorage.getItem('elevate_user_name') || '';
+                        const storedName = localStorage.getItem('elevate_user_name') || participantName || '';
                         const alreadySubmitted = storedName && activeMeeting.participants?.some(
                           p => p.name.toLowerCase() === storedName.toLowerCase()
                         );
@@ -1437,15 +1447,15 @@ export default function App() {
                       {activeMeeting.participants.map(p => (
                         <div key={p.id} className="relative">
                           <button
-                            onClick={() => setExpandedParticipantId(expandedParticipantId === p.id ? null : p.id)}
+                            onClick={(e) => { e.stopPropagation(); setExpandedParticipantId(expandedParticipantId === p.id ? null : p.id); }}
                             className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-all ${expandedParticipantId === p.id ? 'bg-orange-500/30 text-orange-300 ring-1 ring-orange-500/40' : 'bg-green-500/20 text-green-400'}`}
                           >
                             <CheckCircle2 className="w-3 h-3" />{p.name}
                           </button>
                           {expandedParticipantId === p.id && (
-                            <div className="absolute top-full left-0 mt-1 bg-gray-900 border border-white/20 rounded-xl shadow-xl z-20 overflow-hidden min-w-[160px]">
+                            <div className="absolute top-full left-0 mt-1 bg-gray-900 border border-white/20 rounded-xl shadow-xl z-20 overflow-hidden min-w-[160px]" onClick={e => e.stopPropagation()}>
                               <button
-                                onClick={() => { setViewingParticipant(p); setExpandedParticipantId(null); }}
+                                onClick={() => { setViewingParticipant(p); setExpandedParticipantId(null); setEditingParticipantSlots(null); }}
                                 className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-white hover:bg-white/10 transition-all"
                               >
                                 <CalendarIcon className="w-4 h-4 text-orange-400" />View Schedule
