@@ -42,8 +42,10 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
-// --- Deepgram Config ---
-const DEEPGRAM_API_KEY = '9c18843fc8a8278a0a0ed40f564776a3f4423a13';
+// --- Transcription Proxy ---
+// Audio is sent to a Netlify serverless function that proxies to Deepgram server-side,
+// bypassing CORS. The DEEPGRAM_API_KEY lives in Netlify environment variables.
+const TRANSCRIBE_ENDPOINT = '/.netlify/functions/transcribe';
 
 // --- Types ---
 type ParsedSlot = {
@@ -355,13 +357,12 @@ export default function App() {
         setTranscript('Transcribing with Deepgram...');
 
         try {
-          // Send to Deepgram for transcription
+          // Send to Deepgram via Netlify proxy (bypasses CORS)
           const dgResponse = await fetch(
-            'https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true',
+            TRANSCRIBE_ENDPOINT,
             {
               method: 'POST',
               headers: {
-                'Authorization': `Token ${DEEPGRAM_API_KEY}`,
                 'Content-Type': mediaRecorder.mimeType || 'audio/webm',
               },
               body: audioBlob,
@@ -459,9 +460,9 @@ export default function App() {
         stream.getTracks().forEach(t => t.stop());
         const blob = new Blob(chunks, { type: mimeType });
         try {
-          const res = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true', {
+          const res = await fetch(TRANSCRIBE_ENDPOINT, {
             method: 'POST',
-            headers: { 'Authorization': `Token ${DEEPGRAM_API_KEY}`, 'Content-Type': mimeType },
+            headers: { 'Content-Type': mimeType },
             body: blob,
           });
           const data = await res.json();
