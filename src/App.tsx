@@ -202,6 +202,26 @@ export default function App() {
   const [meetingGroups, setMeetingGroups] = useState<MeetingGroup[]>([]);
   const [activeMeeting, setActiveMeeting] = useState<MeetingGroup | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [myGroupIds, setMyGroupIds] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('elevate_my_groups') || '[]'); } catch { return []; }
+  });
+
+  const addMyGroup = (id: string) => {
+    setMyGroupIds(prev => {
+      if (prev.includes(id)) return prev;
+      const updated = [...prev, id];
+      localStorage.setItem('elevate_my_groups', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const removeMyGroup = (id: string) => {
+    setMyGroupIds(prev => {
+      const updated = prev.filter(g => g !== id);
+      localStorage.setItem('elevate_my_groups', JSON.stringify(updated));
+      return updated;
+    });
+  };
   const [joinCode, setJoinCode] = useState('');
   const [joinError, setJoinError] = useState('');
   const [hasMic, setHasMic] = useState<boolean | null>(null);
@@ -282,6 +302,7 @@ export default function App() {
     if (!createForm.title || !createForm.creatorName || !createForm.creatorEmail || !createForm.deadline) return;
     const newMeeting = { ...createForm, participants: [], archivedParticipants: [], createdAt: new Date().toISOString(), notified: false };
     const docRef = await addDoc(collection(db, 'meetingGroups'), newMeeting);
+    addMyGroup(docRef.id);
     setActiveMeeting({ ...newMeeting, id: docRef.id });
     setView('results');
     setCreateForm({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4, requireCode: false });
@@ -292,6 +313,7 @@ export default function App() {
     const docSnap = await getDoc(doc(db, 'meetingGroups', id));
     if (docSnap.exists()) {
       const meeting = { id: docSnap.id, ...docSnap.data() } as MeetingGroup;
+      addMyGroup(meeting.id);
       // If requireCode is on AND this came from a link (not manual code entry), show the results page instead of submit
       if (meeting.requireCode && fromLink) {
         setActiveMeeting(meeting);
@@ -658,6 +680,7 @@ export default function App() {
         updatedParticipants = [...existingParticipants, participant];
       }
       await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
+      addMyGroup(activeMeeting.id);
       setSubmitStep('done');
       setParticipantName('');
       setTranscript('');
@@ -678,6 +701,7 @@ export default function App() {
 
   const handleDeleteMeeting = async (meetingId: string) => {
     await deleteDoc(doc(db, 'meetingGroups', meetingId));
+    removeMyGroup(meetingId);
     if (activeMeeting?.id === meetingId) {
       setActiveMeeting(null);
       setView('home');
@@ -798,18 +822,20 @@ export default function App() {
 
               <div>
                 <h2 className="font-bold text-white mb-4">Your Meeting Groups</h2>
-                {meetingGroups.length === 0 ? (
+                {(() => {
+                  const myGroups = meetingGroups.filter(g => myGroupIds.includes(g.id));
+                  return myGroups.length === 0 ? (
                   <div className="text-center py-20 bg-white/5 rounded-3xl border border-dashed border-white/10">
                     <CalendarIcon className="w-12 h-12 text-white/20 mx-auto mb-4" />
                     <p className="text-white/40 font-medium">No meeting groups yet.</p>
-                    <p className="text-white/30 text-sm">Create one to get started.</p>
+                    <p className="text-white/30 text-sm">Create one or join with a link to get started.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {meetingGroups.map(group => {
+                    {myGroups.map(group => {
                       const submitted = group.participants?.length || 0;
                       const total = group.expectedCount;
-                      const pct = Math.round((submitted / total) * 100);
+                      const pct = Math.min(100, Math.round((submitted / total) * 100));
                       return (
                         <motion.div key={group.id} whileHover={{ y: -2 }} className="bg-white/5 border border-white/10 rounded-2xl p-5 cursor-pointer hover:border-orange-500/40 transition-all relative group">
                           <div onClick={() => { setActiveMeeting(group); setView('results'); }}>
@@ -843,7 +869,8 @@ export default function App() {
                       );
                     })}
                   </div>
-                )}
+                );
+                })()}
               </div>
             </motion.div>
           )}
