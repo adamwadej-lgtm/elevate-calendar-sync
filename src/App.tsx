@@ -237,7 +237,7 @@ export default function App() {
 
   // Submit flow
   const [submitStep, setSubmitStep] = useState<'input' | 'review' | 'editing' | 'done'>('input');
-  const [participantName, setParticipantName] = useState('');
+  const [participantName, setParticipantName] = useState(() => localStorage.getItem('elevate_user_name') || '');
   const [transcript, setTranscript] = useState('');
   const [textInput, setTextInput] = useState('');
   const [isRecording, setIsRecording] = useState(false);
@@ -304,6 +304,8 @@ export default function App() {
     const newMeeting = { ...createForm, participants: [], archivedParticipants: [], createdAt: new Date().toISOString(), notified: false };
     const docRef = await addDoc(collection(db, 'meetingGroups'), newMeeting);
     addMyGroup(docRef.id);
+    localStorage.setItem('elevate_user_name', createForm.creatorName.trim());
+    setParticipantName(createForm.creatorName.trim());
     setActiveMeeting({ ...newMeeting, id: docRef.id });
     setView('results');
     setCreateForm({ title: '', creatorName: '', creatorEmail: '', deadline: '', expectedCount: 4, requireCode: false });
@@ -698,7 +700,6 @@ export default function App() {
       addMyGroup(activeMeeting.id);
       localStorage.setItem('elevate_user_name', participantName.trim());
       setSubmitStep('done');
-      setParticipantName('');
       setTranscript('');
       setTextInput('');
       setParsedSlots([]);

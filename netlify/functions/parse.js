@@ -27,37 +27,27 @@ exports.handler = async (event) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-sonnet-4-6',
         max_tokens: 2000,
         messages: [{
           role: 'user',
-          content: `Today's date is ${referenceDate} (the current year is ${referenceDate.split('-')[0]}). Parse this availability statement into structured JSON.${existingContext}
+          content: `Today is ${referenceDate} (year ${referenceDate.split('-')[0]}). Parse availability into JSON.${existingContext}
 
-Statement: "${transcript}"
+"${transcript}"
 
-Return ONLY a JSON object with two fields:
-1. "slots": an array where each item has:
-   - "date": YYYY-MM-DD (always use the year ${referenceDate.split('-')[0]} unless another year is explicitly stated)
-   - "start": HH:mm (24hr) — use "00:00" if unavailable all day
-   - "end": HH:mm (24hr) — use "00:00" if unavailable all day  
-   - "unavailable": true ONLY if the person explicitly says they are NOT available that date
-2. "warnings": an array of strings for any issues found (can be empty)
+Return JSON object: {"slots": [...], "warnings": [...]}
 
-Rules:
-- CRITICAL DISTINCTION between recurring patterns and specific dates:
-  * "every Saturday in May" or "all Saturdays in June" = ONLY the dates that are actually Saturdays in that month. NOT every day in the month.
-  * "June 4th, 5th, and 6th" = ONLY those three specific dates. NOT every day in June.
-  * "every Monday and Wednesday in July" = ONLY the Mondays and Wednesdays in July.
-  * "the whole month of June" or "every day in June" = every day in June.
-- Only expand to multiple dates when the user explicitly says "every [day]" or "all [days]" in a month. Listing specific dates like "4th, 5th, and 6th" means ONLY those dates.
-- Handle exclusions ("except June 8th" = mark June 8th as unavailable: true)
-- Convert 12hr to 24hr (9am=09:00, 2pm=14:00, 6pm=18:00)
-- CRITICAL DAY VALIDATION: When the user says a day name AND a date (like "Monday June 8th"), verify the day-of-week for that date in ${referenceDate.split('-')[0]}. If they don't match, add a warning. Always use the DATE number they said.
-- If the user only says a day name without a specific date (like "every Monday"), use the correct dates that ARE that day in ${referenceDate.split('-')[0]}.
-- Do NOT include dates before ${referenceDate}. Only include today or future dates.
-- If merging with existing: apply corrections, keep everything else unchanged
-- "remove June 4th" = remove that date from results entirely
-- Return ONLY the JSON object, no explanation, no markdown backticks.`
+Each slot: {"date":"YYYY-MM-DD", "start":"HH:mm", "end":"HH:mm"} or add "unavailable":true if they said NOT available.
+
+Key rules:
+- Year is ${referenceDate.split('-')[0]} unless stated otherwise
+- "June 4th, 5th, and 6th" = exactly 3 dates, NOT every day in June
+- "every Saturday in May" = only the Saturdays in May ${referenceDate.split('-')[0]}
+- Skip dates before ${referenceDate}
+- 9am=09:00, 2pm=14:00, etc
+- If day name doesn't match date (e.g. "Monday June 8" but June 8 is not Monday), add warning, use the date
+- Merging: newer entries replace same-date conflicts
+- Return ONLY the JSON, no markdown, no explanation.`
         }]
       })
     });
