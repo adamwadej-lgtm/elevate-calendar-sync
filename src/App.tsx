@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, onSnapshot, collection, addDoc, updateDoc, getDoc } from 'firebase/firestore';
+import { getFirestore, doc, onSnapshot, collection, addDoc, updateDoc, getDoc, deleteDoc } from 'firebase/firestore';
 
 // --- Firebase Config ---
 const firebaseConfig = {
@@ -41,6 +41,9 @@ const firebaseConfig = {
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+
+// --- Deepgram Config ---
+const DEEPGRAM_API_KEY = '9c18843fc8a8278a0a0ed40f564776a3f4423a13';
 
 // --- Types ---
 type ParsedSlot = {
@@ -291,7 +294,7 @@ export default function App() {
     }
   };
 
-  // --- Main recording using MediaRecorder (works reliably on mobile) ---
+  // --- Main recording using Deepgram (works on all devices) ---
   const mediaRecorderRef = useRef<any>(null);
   const audioChunksRef = useRef<Blob[]>([]);
 
@@ -303,7 +306,7 @@ export default function App() {
   const stopRecording = useCallback(() => {
     stopAllTimers();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
+      try { mediaRecorderRef.current.stop(); } catch {}
     }
     setIsRecording(false);
     setRecordingSecondsLeft(60);
@@ -320,88 +323,90 @@ export default function App() {
       setSubmitError('');
       setRecordingSecondsLeft(60);
 
-      const mediaRecorder = new (window as any).MediaRecorder(stream);
+      // Pick best supported format
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : '';
+
+      const mediaRecorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+
       mediaRecorderRef.current = mediaRecorder;
 
       mediaRecorder.ondataavailable = (e: any) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
       };
 
       mediaRecorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop());
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        if (audioChunksRef.current.length === 0) {
+          setSubmitError('No audio captured. Please try again.');
+          setIsParsing(false);
+          return;
+        }
 
-        // Convert to base64 and send to Claude for transcription + parsing
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          const base64 = (reader.result as string).split(',')[1];
-          setIsParsing(true);
-          setTranscript('Transcribing your recording...');
-          try {
-            const today = new Date().toISOString().split('T')[0];
-            const response = await fetch('https://api.anthropic.com/v1/messages', {
+        const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
+        setIsParsing(true);
+        setTranscript('Transcribing with Deepgram...');
+
+        try {
+          // Send to Deepgram for transcription
+          const dgResponse = await fetch(
+            'https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true',
+            {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 2000,
-                messages: [{
-                  role: 'user',
-                  content: [
-                    {
-                      type: 'document',
-                      source: { type: 'base64', media_type: 'audio/webm', data: base64 }
-                    },
-                    {
-                      type: 'text',
-                      text: `Today's date is ${today}. This audio contains someone describing their availability for scheduling. 
+              headers: {
+                'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+                'Content-Type': mediaRecorder.mimeType || 'audio/webm',
+              },
+              body: audioBlob,
+            }
+          );
 
-First transcribe what they said, then parse it into availability slots.
-
-Return ONLY a JSON object with two fields:
-{
-  "transcript": "exact transcription of what was said",
-  "slots": [
-    { "date": "YYYY-MM-DD", "start": "HH:mm", "end": "HH:mm", "unavailable": false }
-  ]
-}
-
-Rules for slots:
-- Expand recurring patterns (every Monday in June = list each Monday)
-- Handle exclusions (except June 8th = mark unavailable: true)  
-- Convert 12hr to 24hr (9am=09:00, 2pm=14:00)
-- unavailable: true only if they say they are NOT available that date
-- Return ONLY the JSON, no markdown, no explanation.`
-                    }
-                  ]
-                }]
-              })
-            });
-            const data = await response.json();
-            const text = data.content?.[0]?.text || '{}';
-            const clean = text.replace(/```json|```/g, '').trim();
-            const parsed = JSON.parse(clean);
-            const newTranscript = parsed.transcript || '';
-            const newSlots = parsed.slots || [];
-            // Append to existing if user recorded multiple times
-            const combined = (finalTranscriptRef.current ? finalTranscriptRef.current + ' ' : '') + newTranscript;
-            finalTranscriptRef.current = combined;
-            setTranscript(combined);
-            setParsedSlots(prev => [...prev, ...newSlots]);
-            setIsParsing(false);
-          } catch (e) {
-            setTranscript('');
-            setSubmitError('Could not process audio. Please try again.');
-            setIsParsing(false);
+          if (!dgResponse.ok) {
+            throw new Error(`Deepgram error: ${dgResponse.status}`);
           }
-        };
-        reader.readAsDataURL(audioBlob);
+
+          const dgData = await dgResponse.json();
+          const transcribedText = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+
+          if (!transcribedText.trim()) {
+            setTranscript('');
+            setSubmitError('No speech detected. Please speak clearly and try again.');
+            setIsParsing(false);
+            return;
+          }
+
+          // Append to existing transcript
+          const combined = finalTranscriptRef.current
+            ? finalTranscriptRef.current + ' ' + transcribedText
+            : transcribedText;
+          finalTranscriptRef.current = combined;
+          setTranscript(combined);
+
+          // Now parse with Claude
+          const today = new Date().toISOString().split('T')[0];
+          const slots = await parseAvailabilityWithClaude(combined, today, parsedSlots);
+          setParsedSlots(slots);
+          setIsParsing(false);
+
+        } catch (e) {
+          console.error('Deepgram error:', e);
+          setTranscript('');
+          setSubmitError('Could not transcribe audio. Please check your connection and try again.');
+          setIsParsing(false);
+        }
       };
 
-      mediaRecorder.start(100); // collect data every 100ms
+      mediaRecorder.start(250);
       setIsRecording(true);
 
-      // Countdown timer
+      // Countdown
       let secondsLeft = 60;
       countdownRef.current = setInterval(() => {
         secondsLeft -= 1;
@@ -409,22 +414,21 @@ Rules for slots:
         if (secondsLeft <= 0) stopRecording();
       }, 1000);
 
-      // Hard stop at 60s
       maxTimerRef.current = setTimeout(() => stopRecording(), 60000);
 
-    } catch (e) {
-      setSubmitError('Could not access microphone. Please allow microphone access and try again.');
+    } catch (e: any) {
+      if (e.name === 'NotAllowedError') {
+        setSubmitError('Microphone access denied. Please allow microphone access in your browser settings.');
+      } else {
+        setSubmitError('Could not start recording. Please try again.');
+      }
     }
   };
 
   const handleProcessInput = async () => {
-    // If using text input (no mic)
     if (!hasMic) {
       const input = textInput.trim();
-      if (!input || !participantName.trim()) {
-        setSubmitError('Please enter your name and provide your availability.');
-        return;
-      }
+      if (!input || !participantName.trim()) { setSubmitError('Please enter your name and availability.'); return; }
       setIsParsing(true);
       setSubmitError('');
       const today = new Date().toISOString().split('T')[0];
@@ -434,44 +438,48 @@ Rules for slots:
       setIsParsing(false);
       return;
     }
-    // For voice — slots already parsed live after each recording stop
-    if (!finalTranscriptRef.current && parsedSlots.length === 0) {
+    if (!finalTranscriptRef.current.trim() && parsedSlots.length === 0) {
       setSubmitError('Please record your availability first.');
       return;
     }
-    if (!participantName.trim()) {
-      setSubmitError('Please enter your name.');
-      return;
-    }
+    if (!participantName.trim()) { setSubmitError('Please enter your name.'); return; }
     setSubmitStep('review');
   };
 
-  // --- Edit recording ---
-  const startEditRecording = () => {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
-    const recognition = new SR();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-    recognition.onresult = (event: any) => {
-      let final = ''; let interim = '';
-      for (let i = 0; i < event.results.length; i++) {
-        if (event.results[i].isFinal) final += event.results[i][0].transcript + ' ';
-        else interim += event.results[i][0].transcript;
-      }
-      setEditTranscript(final + interim);
-    };
-    recognition.onerror = () => setIsEditRecording(false);
-    recognition.onend = () => setIsEditRecording(false);
-    editRecognitionRef.current = recognition;
-    recognition.start();
-    setIsEditRecording(true);
-    setEditTranscript('');
+  // --- Edit recording using Deepgram ---
+  const startEditRecording = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks: Blob[] = [];
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+      const mr = new MediaRecorder(stream, { mimeType });
+      mr.ondataavailable = (e: any) => { if (e.data.size > 0) chunks.push(e.data); };
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunks, { type: mimeType });
+        try {
+          const res = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true', {
+            method: 'POST',
+            headers: { 'Authorization': `Token ${DEEPGRAM_API_KEY}`, 'Content-Type': mimeType },
+            body: blob,
+          });
+          const data = await res.json();
+          const text = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+          setEditTranscript(text);
+        } catch { setEditTranscript(''); }
+        setIsEditRecording(false);
+      };
+      mr.start(250);
+      setIsEditRecording(true);
+      editRecognitionRef.current = mr;
+    } catch { setIsEditRecording(false); }
   };
 
   const stopEditRecording = () => {
-    if (editRecognitionRef.current) editRecognitionRef.current.stop();
+    if (editRecognitionRef.current && editRecognitionRef.current.state !== 'inactive') {
+      try { editRecognitionRef.current.stop(); } catch {}
+    }
     setIsEditRecording(false);
   };
 
@@ -544,6 +552,14 @@ Rules for slots:
     navigator.clipboard.writeText(url);
     setCopiedId(meetingId);
     setTimeout(() => setCopiedId(''), 2000);
+  };
+
+  const handleDeleteMeeting = async (meetingId: string) => {
+    await deleteDoc(doc(db, 'meetingGroups', meetingId));
+    if (activeMeeting?.id === meetingId) {
+      setActiveMeeting(null);
+      setView('home');
+    }
   };
 
   const resetSubmit = () => {
@@ -641,25 +657,34 @@ Rules for slots:
                       const total = group.expectedCount;
                       const pct = Math.round((submitted / total) * 100);
                       return (
-                        <motion.div key={group.id} whileHover={{ y: -2 }} onClick={() => { setActiveMeeting(group); setView('results'); }} className="bg-white/5 border border-white/10 rounded-2xl p-5 cursor-pointer hover:border-orange-500/40 transition-all">
-                          <div className="flex justify-between items-start mb-3">
-                            <div>
-                              <h3 className="font-bold text-white">{group.title}</h3>
-                              <p className="text-white/40 text-xs">by {group.creatorName}</p>
+                        <motion.div key={group.id} whileHover={{ y: -2 }} className="bg-white/5 border border-white/10 rounded-2xl p-5 cursor-pointer hover:border-orange-500/40 transition-all relative group">
+                          <div onClick={() => { setActiveMeeting(group); setView('results'); }}>
+                            <div className="flex justify-between items-start mb-3">
+                              <div>
+                                <h3 className="font-bold text-white">{group.title}</h3>
+                                <p className="text-white/40 text-xs">by {group.creatorName}</p>
+                              </div>
+                              <div className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${submitted >= total ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'}`}>
+                                {submitted >= total ? 'Complete' : 'Pending'}
+                              </div>
                             </div>
-                            <div className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase ${submitted >= total ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'}`}>
-                              {submitted >= total ? 'Complete' : 'Pending'}
+                            <div className="space-y-1">
+                              <div className="flex justify-between text-xs text-white/40">
+                                <span>{submitted} of {total} submitted</span>
+                                <span>Due {formatDate(group.deadline)}</span>
+                              </div>
+                              <div className="w-full bg-white/10 rounded-full h-1.5">
+                                <div className="bg-orange-500 h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }}></div>
+                              </div>
                             </div>
                           </div>
-                          <div className="space-y-1">
-                            <div className="flex justify-between text-xs text-white/40">
-                              <span>{submitted} of {total} submitted</span>
-                              <span>Due {formatDate(group.deadline)}</span>
-                            </div>
-                            <div className="w-full bg-white/10 rounded-full h-1.5">
-                              <div className="bg-orange-500 h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }}></div>
-                            </div>
-                          </div>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete "${group.title}"? This cannot be undone.`)) handleDeleteMeeting(group.id); }}
+                            className="absolute top-3 right-3 p-1.5 rounded-lg text-white/20 hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
+                            title="Delete meeting group"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </motion.div>
                       );
                     })}
@@ -829,7 +854,12 @@ Rules for slots:
                       onClick={handleProcessInput}
                       className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
                     >
-                      {isParsing ? <><Loader2 className="w-5 h-5 animate-spin" />Processing audio...</> : <><Send className="w-5 h-5" />{parsedSlots.length > 0 ? `Review My Schedule (${parsedSlots.length} slots found)` : 'Process My Schedule'}</>}
+                      {isParsing
+                        ? <><Loader2 className="w-5 h-5 animate-spin" />Transcribing & analyzing...</>
+                        : parsedSlots.length > 0
+                        ? <><Send className="w-5 h-5" />Review My Schedule ({parsedSlots.length} slots found)</>
+                        : <><Send className="w-5 h-5" />Process My Schedule</>
+                      }
                     </button>
                   </motion.div>
                 )}
@@ -1052,6 +1082,13 @@ Rules for slots:
                     </button>
                     <button onClick={() => { setView('submit'); resetSubmit(); }} className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all">
                       <Mic className="w-4 h-4" />Submit Mine
+                    </button>
+                    <button
+                      onClick={() => { if (window.confirm(`Delete "${activeMeeting.title}"? This cannot be undone.`)) handleDeleteMeeting(activeMeeting.id); }}
+                      className="p-2 text-white/30 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-all"
+                      title="Delete this meeting group"
+                    >
+                      <Trash2 className="w-5 h-5" />
                     </button>
                   </div>
                 </div>
