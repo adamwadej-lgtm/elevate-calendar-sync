@@ -414,8 +414,9 @@ export default function App() {
         const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || 'audio/webm' });
         setIsParsing(true);
 
+        // Step 1: Convert audio to base64
+        let transcribedText = '';
         try {
-          // Convert audio to base64 to avoid binary corruption through Netlify gateway
           const arrayBuffer = await audioBlob.arrayBuffer();
           const uint8 = new Uint8Array(arrayBuffer);
           let binary = '';
@@ -424,7 +425,7 @@ export default function App() {
           }
           const base64Audio = btoa(binary);
 
-          // Send base64 to Netlify proxy for Deepgram transcription
+          // Step 2: Send to Deepgram via Netlify proxy
           const dgResponse = await fetch(
             TRANSCRIBE_ENDPOINT,
             {
@@ -442,34 +443,42 @@ export default function App() {
           if (!dgResponse.ok) {
             const errorBody = await dgResponse.text().catch(() => '');
             console.error('Transcription proxy error:', dgResponse.status, errorBody);
-            throw new Error(`Transcription error: ${dgResponse.status}`);
+            setSubmitError(`Transcription failed (${dgResponse.status}). ${errorBody.slice(0, 100)}`);
+            setIsParsing(false);
+            return;
           }
 
           const dgData = await dgResponse.json();
-          const transcribedText = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+          transcribedText = dgData?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
 
           if (!transcribedText.trim()) {
             setSubmitError('No speech detected. Please speak clearly and try again.');
             setIsParsing(false);
             return;
           }
+        } catch (e: any) {
+          console.error('Deepgram transcription error:', e);
+          setSubmitError(`Transcription error: ${e.message || 'Unknown error'}`);
+          setIsParsing(false);
+          return;
+        }
 
-          // Store transcript internally (not displayed to user)
+        // Step 3: Parse with Claude to extract schedule
+        try {
           const combined = finalTranscriptRef.current
             ? finalTranscriptRef.current + ' ' + transcribedText
             : transcribedText;
           finalTranscriptRef.current = combined;
-          setTranscript(combined); // used only to track that we have data
+          setTranscript(combined);
 
-          // Parse with Claude to extract schedule
           const today = new Date().toISOString().split('T')[0];
           const slots = await parseAvailabilityWithClaude(combined, today, parsedSlots);
           setParsedSlots(slots);
           setIsParsing(false);
 
-        } catch (e) {
-          console.error('Transcription error:', e);
-          setSubmitError('Could not transcribe audio. Please check your connection and try again.');
+        } catch (e: any) {
+          console.error('Claude parsing error:', e);
+          setSubmitError(`Schedule parsing failed: ${e.message || 'Unknown error'}. Your voice was captured — try tapping Process My Schedule.`);
           setIsParsing(false);
         }
       };
