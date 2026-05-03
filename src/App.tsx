@@ -519,11 +519,16 @@ export default function App() {
       if (!input || !participantName.trim()) { setSubmitError('Please enter your name and availability.'); return; }
       setIsParsing(true);
       setSubmitError('');
-      const today = new Date().toISOString().split('T')[0];
-      const result = await parseAvailabilityWithClaude(input, today);
-      setParsedSlots(result.slots);
-      setParseWarnings(result.warnings);
-      setSubmitStep('review');
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const result = await parseAvailabilityWithClaude(input, today);
+        setParsedSlots(result.slots);
+        setParseWarnings(result.warnings);
+        setSubmitStep('review');
+      } catch (e: any) {
+        console.error('Text parse error:', e);
+        setSubmitError(`Could not parse schedule: ${e.message || 'Unknown error'}`);
+      }
       setIsParsing(false);
       return;
     }
@@ -629,32 +634,39 @@ export default function App() {
 
   const handleSubmitAvailability = async () => {
     if (!activeMeeting) return;
-    const participant: Participant = {
-      id: generateId(),
-      name: participantName.trim(),
-      transcript: hasMic ? transcript : textInput,
-      slots: parsedSlots,
-      submittedAt: new Date().toISOString()
-    };
-    const existingParticipants = activeMeeting.participants || [];
-    // Check if this person already submitted (by name, case-insensitive)
-    const existingIndex = existingParticipants.findIndex(
-      p => p.name.toLowerCase() === participantName.trim().toLowerCase()
-    );
-    let updatedParticipants: Participant[];
-    if (existingIndex >= 0) {
-      // Replace existing entry
-      updatedParticipants = [...existingParticipants];
-      updatedParticipants[existingIndex] = participant;
-    } else {
-      updatedParticipants = [...existingParticipants, participant];
+    if (!participantName.trim()) {
+      setSubmitError('Name is required to submit.');
+      return;
     }
-    await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
-    setSubmitStep('done');
-    setParticipantName('');
-    setTranscript('');
-    setTextInput('');
-    setParsedSlots([]);
+    try {
+      const participant: Participant = {
+        id: generateId(),
+        name: participantName.trim(),
+        transcript: hasMic ? transcript : textInput,
+        slots: parsedSlots,
+        submittedAt: new Date().toISOString()
+      };
+      const existingParticipants = activeMeeting.participants || [];
+      const existingIndex = existingParticipants.findIndex(
+        p => p.name.toLowerCase() === participantName.trim().toLowerCase()
+      );
+      let updatedParticipants: Participant[];
+      if (existingIndex >= 0) {
+        updatedParticipants = [...existingParticipants];
+        updatedParticipants[existingIndex] = participant;
+      } else {
+        updatedParticipants = [...existingParticipants, participant];
+      }
+      await updateDoc(doc(db, 'meetingGroups', activeMeeting.id), { participants: updatedParticipants });
+      setSubmitStep('done');
+      setParticipantName('');
+      setTranscript('');
+      setTextInput('');
+      setParsedSlots([]);
+    } catch (e: any) {
+      console.error('Submit error:', e);
+      setSubmitError(`Could not submit schedule: ${e.message || 'Unknown error'}`);
+    }
   };
 
   const copyJoinLink = (meetingId: string) => {
