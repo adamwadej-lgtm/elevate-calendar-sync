@@ -312,56 +312,67 @@ export default function App() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) { setSubmitError('Voice not supported. Please use Chrome.'); return; }
 
-    // Reset
-    finalTranscriptRef.current = '';
-    setTranscript('');
     setSubmitError('');
     setRecordingSecondsLeft(60);
 
-    const recognition = new SR();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-    recognition.maxAlternatives = 1;
+    // We accumulate ONLY finalized text here across restarts
+    // finalTranscriptRef already holds text from previous recordings in this session
+    const sessionBaseText = finalTranscriptRef.current;
 
-    recognition.onresult = (event: any) => {
-      // Reset silence timer every time speech is detected
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = setTimeout(() => {
-        stopRecording();
-      }, 5000); // 5 seconds of silence before auto-stop
+    const launchRecognition = () => {
+      if (!maxTimerRef.current) return; // stopped externally
 
-      // Build transcript cleanly: only use final results + current interim
-      let finalText = '';
-      let interimText = '';
-      for (let i = 0; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalText += event.results[i][0].transcript + ' ';
-        } else {
-          interimText = event.results[i][0].transcript;
+      const recognition = new SR();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+      recognition.maxAlternatives = 1;
+
+      // Track finals from THIS recognition instance only
+      let instanceFinal = '';
+
+      recognition.onresult = (event: any) => {
+        // Reset silence timer on any speech activity
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => stopRecording(), 5000);
+
+        // Only look at results from this instance
+        let newFinal = '';
+        let interim = '';
+        for (let i = 0; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            newFinal += event.results[i][0].transcript + ' ';
+          } else {
+            interim = event.results[i][0].transcript;
+          }
         }
-      }
-      finalTranscriptRef.current = finalText;
-      setTranscript(finalText + interimText);
+
+        instanceFinal = newFinal;
+        const combined = sessionBaseText + instanceFinal + interim;
+        finalTranscriptRef.current = sessionBaseText + instanceFinal;
+        setTranscript(combined);
+      };
+
+      recognition.onerror = (event: any) => {
+        if (event.error === 'no-speech' || event.error === 'aborted') return;
+        stopRecording();
+        setSubmitError('Recording error. Try again.');
+      };
+
+      recognition.onend = () => {
+        // Don't restart — just stop cleanly
+        // Mobile will fire onend after silence; that's fine, user can tap Record again
+      };
+
+      recognitionRef.current = recognition;
+      try { recognition.start(); } catch (e) { console.error(e); }
     };
 
-    recognition.onerror = (event: any) => {
-      // Ignore no-speech errors — just keep going
-      if (event.error === 'no-speech') return;
-      stopRecording();
-      if (event.error !== 'aborted') setSubmitError('Recording error. Try again.');
-    };
+    // Reset transcript only if starting fresh (no prior text)
+    if (!finalTranscriptRef.current) {
+      setTranscript('');
+    }
 
-    recognition.onend = () => {
-      // If still within time limit and not manually stopped, restart recognition
-      // This handles mobile browsers that auto-end after silence
-      if (recognitionRef.current && maxTimerRef.current) {
-        try { recognition.start(); } catch {}
-      }
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
     setIsRecording(true);
 
     // 60 second countdown
@@ -373,14 +384,12 @@ export default function App() {
     }, 1000);
 
     // Hard stop at 60 seconds
-    maxTimerRef.current = setTimeout(() => {
-      stopRecording();
-    }, 60000);
+    maxTimerRef.current = setTimeout(() => stopRecording(), 60000);
 
-    // Initial silence timer
-    silenceTimerRef.current = setTimeout(() => {
-      stopRecording();
-    }, 5000);
+    // Silence timer starts now
+    silenceTimerRef.current = setTimeout(() => stopRecording(), 5000);
+
+    launchRecognition();
   };
 
   const handleProcessInput = async () => {
