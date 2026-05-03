@@ -291,120 +291,159 @@ export default function App() {
     }
   };
 
-  // --- Main recording ---
+  // --- Main recording using MediaRecorder (works reliably on mobile) ---
+  const mediaRecorderRef = useRef<any>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
   const stopAllTimers = () => {
-    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
     if (maxTimerRef.current) { clearTimeout(maxTimerRef.current); maxTimerRef.current = null; }
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
   };
 
   const stopRecording = useCallback(() => {
     stopAllTimers();
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch {}
-      recognitionRef.current = null;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
     }
     setIsRecording(false);
     setRecordingSecondsLeft(60);
   }, []);
 
-  const startRecording = () => {
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) { setSubmitError('Voice not supported. Please use Chrome.'); return; }
-
-    setSubmitError('');
-    setRecordingSecondsLeft(60);
-
-    // We accumulate ONLY finalized text here across restarts
-    // finalTranscriptRef already holds text from previous recordings in this session
-    const sessionBaseText = finalTranscriptRef.current;
-
-    const launchRecognition = () => {
-      if (!maxTimerRef.current) return; // stopped externally
-
-      const recognition = new SR();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-      recognition.maxAlternatives = 1;
-
-      // Track finals from THIS recognition instance only
-      let instanceFinal = '';
-
-      recognition.onresult = (event: any) => {
-        // Reset silence timer on any speech activity
-        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-        silenceTimerRef.current = setTimeout(() => stopRecording(), 5000);
-
-        // Only look at results from this instance
-        let newFinal = '';
-        let interim = '';
-        for (let i = 0; i < event.results.length; i++) {
-          if (event.results[i].isFinal) {
-            newFinal += event.results[i][0].transcript + ' ';
-          } else {
-            interim = event.results[i][0].transcript;
-          }
-        }
-
-        instanceFinal = newFinal;
-        const combined = sessionBaseText + instanceFinal + interim;
-        finalTranscriptRef.current = sessionBaseText + instanceFinal;
-        setTranscript(combined);
-      };
-
-      recognition.onerror = (event: any) => {
-        if (event.error === 'no-speech' || event.error === 'aborted') return;
-        stopRecording();
-        setSubmitError('Recording error. Try again.');
-      };
-
-      recognition.onend = () => {
-        // Don't restart — just stop cleanly
-        // Mobile will fire onend after silence; that's fine, user can tap Record again
-      };
-
-      recognitionRef.current = recognition;
-      try { recognition.start(); } catch (e) { console.error(e); }
-    };
-
-    // Reset transcript only if starting fresh (no prior text)
-    if (!finalTranscriptRef.current) {
-      setTranscript('');
+  const startRecording = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setSubmitError('Microphone not supported on this device.');
+      return;
     }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      setSubmitError('');
+      setRecordingSecondsLeft(60);
 
-    setIsRecording(true);
+      const mediaRecorder = new (window as any).MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
 
-    // 60 second countdown
-    let secondsLeft = 60;
-    countdownRef.current = setInterval(() => {
-      secondsLeft -= 1;
-      setRecordingSecondsLeft(secondsLeft);
-      if (secondsLeft <= 0) stopRecording();
-    }, 1000);
+      mediaRecorder.ondataavailable = (e: any) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
 
-    // Hard stop at 60 seconds
-    maxTimerRef.current = setTimeout(() => stopRecording(), 60000);
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
 
-    // Silence timer starts now
-    silenceTimerRef.current = setTimeout(() => stopRecording(), 5000);
+        // Convert to base64 and send to Claude for transcription + parsing
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64 = (reader.result as string).split(',')[1];
+          setIsParsing(true);
+          setTranscript('Transcribing your recording...');
+          try {
+            const today = new Date().toISOString().split('T')[0];
+            const response = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 2000,
+                messages: [{
+                  role: 'user',
+                  content: [
+                    {
+                      type: 'document',
+                      source: { type: 'base64', media_type: 'audio/webm', data: base64 }
+                    },
+                    {
+                      type: 'text',
+                      text: `Today's date is ${today}. This audio contains someone describing their availability for scheduling. 
 
-    launchRecognition();
+First transcribe what they said, then parse it into availability slots.
+
+Return ONLY a JSON object with two fields:
+{
+  "transcript": "exact transcription of what was said",
+  "slots": [
+    { "date": "YYYY-MM-DD", "start": "HH:mm", "end": "HH:mm", "unavailable": false }
+  ]
+}
+
+Rules for slots:
+- Expand recurring patterns (every Monday in June = list each Monday)
+- Handle exclusions (except June 8th = mark unavailable: true)  
+- Convert 12hr to 24hr (9am=09:00, 2pm=14:00)
+- unavailable: true only if they say they are NOT available that date
+- Return ONLY the JSON, no markdown, no explanation.`
+                    }
+                  ]
+                }]
+              })
+            });
+            const data = await response.json();
+            const text = data.content?.[0]?.text || '{}';
+            const clean = text.replace(/```json|```/g, '').trim();
+            const parsed = JSON.parse(clean);
+            const newTranscript = parsed.transcript || '';
+            const newSlots = parsed.slots || [];
+            // Append to existing if user recorded multiple times
+            const combined = (finalTranscriptRef.current ? finalTranscriptRef.current + ' ' : '') + newTranscript;
+            finalTranscriptRef.current = combined;
+            setTranscript(combined);
+            setParsedSlots(prev => [...prev, ...newSlots]);
+            setIsParsing(false);
+          } catch (e) {
+            setTranscript('');
+            setSubmitError('Could not process audio. Please try again.');
+            setIsParsing(false);
+          }
+        };
+        reader.readAsDataURL(audioBlob);
+      };
+
+      mediaRecorder.start(100); // collect data every 100ms
+      setIsRecording(true);
+
+      // Countdown timer
+      let secondsLeft = 60;
+      countdownRef.current = setInterval(() => {
+        secondsLeft -= 1;
+        setRecordingSecondsLeft(secondsLeft);
+        if (secondsLeft <= 0) stopRecording();
+      }, 1000);
+
+      // Hard stop at 60s
+      maxTimerRef.current = setTimeout(() => stopRecording(), 60000);
+
+    } catch (e) {
+      setSubmitError('Could not access microphone. Please allow microphone access and try again.');
+    }
   };
 
   const handleProcessInput = async () => {
-    const input = hasMic ? (finalTranscriptRef.current || transcript).trim() : textInput.trim();
-    if (!input || !participantName.trim()) {
-      setSubmitError('Please enter your name and provide your availability.');
+    // If using text input (no mic)
+    if (!hasMic) {
+      const input = textInput.trim();
+      if (!input || !participantName.trim()) {
+        setSubmitError('Please enter your name and provide your availability.');
+        return;
+      }
+      setIsParsing(true);
+      setSubmitError('');
+      const today = new Date().toISOString().split('T')[0];
+      const slots = await parseAvailabilityWithClaude(input, today);
+      setParsedSlots(slots);
+      setSubmitStep('review');
+      setIsParsing(false);
       return;
     }
-    setIsParsing(true);
-    setSubmitError('');
-    const today = new Date().toISOString().split('T')[0];
-    const slots = await parseAvailabilityWithClaude(input, today);
-    setParsedSlots(slots);
+    // For voice — slots already parsed live after each recording stop
+    if (!finalTranscriptRef.current && parsedSlots.length === 0) {
+      setSubmitError('Please record your availability first.');
+      return;
+    }
+    if (!participantName.trim()) {
+      setSubmitError('Please enter your name.');
+      return;
+    }
     setSubmitStep('review');
-    setIsParsing(false);
   };
 
   // --- Edit recording ---
@@ -509,9 +548,14 @@ export default function App() {
 
   const resetSubmit = () => {
     stopAllTimers();
-    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} recognitionRef.current = null; }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop(); } catch {}
+    }
+    mediaRecorderRef.current = null;
+    audioChunksRef.current = [];
     finalTranscriptRef.current = '';
     setIsRecording(false);
+    setIsParsing(false);
     setRecordingSecondsLeft(60);
     setSubmitStep('input');
     setTranscript('');
@@ -781,11 +825,11 @@ export default function App() {
                     )}
 
                     <button
-                      disabled={(!finalTranscriptRef.current && !transcript && !textInput) || !participantName || isParsing || isRecording}
+                      disabled={(!finalTranscriptRef.current && parsedSlots.length === 0 && !textInput) || !participantName || isParsing || isRecording}
                       onClick={handleProcessInput}
                       className="w-full bg-orange-500 text-white py-3 rounded-xl font-bold hover:bg-orange-600 transition-all disabled:opacity-40 flex items-center justify-center gap-2"
                     >
-                      {isParsing ? <><Loader2 className="w-5 h-5 animate-spin" />Analyzing your availability...</> : <><Send className="w-5 h-5" />Process My Schedule</>}
+                      {isParsing ? <><Loader2 className="w-5 h-5 animate-spin" />Processing audio...</> : <><Send className="w-5 h-5" />{parsedSlots.length > 0 ? `Review My Schedule (${parsedSlots.length} slots found)` : 'Process My Schedule'}</>}
                     </button>
                   </motion.div>
                 )}
